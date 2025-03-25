@@ -210,6 +210,10 @@ def train_model_verbose():
         # Use strict=False to allow loading even with architecture changes
         missing_keys, unexpected_keys = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
         
+        # Store missing keys information for later use
+        model._load_missing_keys = missing_keys
+        model._load_unexpected_keys = unexpected_keys
+        
         # Log missing and unexpected keys for debugging
         if missing_keys:
             logger.warning(f"Missing keys in checkpoint: {missing_keys}")
