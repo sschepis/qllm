@@ -320,14 +320,9 @@ class ResonanceAttention(nn.Module):
                 # Get shape information for proper broadcasting
                 batch_size, actual_num_heads, seq_len, head_dim = q.shape
                 
-                # Add debug logging for tensor shapes
-                print(f"DEBUG: q shape = {q.shape}, phase_mod shape = {phase_mod.shape}")
-                
                 # Ensure phase_mod has compatible shape with input tensor
                 if hasattr(self, "phase_factors") and self.phase_factors.shape[1] != actual_num_heads:
-                    # Log the shape mismatch
-                    print(f"WARNING: Phase factors have {self.phase_factors.shape[1]} heads but input has {actual_num_heads} heads")
-                    
+
                     # Create compatible phase modulation
                     temp_phase_factor = torch.ones(1, actual_num_heads, 1, device=q.device) * self.phase_factor
                     phase_mod = temp_phase_factor * torch.sin(phase_angle)
@@ -337,7 +332,6 @@ class ResonanceAttention(nn.Module):
                 
                 # Explicitly expand to match input shape for safe broadcasting
                 if phase_mod.shape[1] != actual_num_heads:
-                    print(f"Expanding phase_mod from shape {phase_mod.shape} to match {actual_num_heads} heads")
                     # Create a new tensor with the correct dimensions
                     expanded_mod = torch.ones(1, actual_num_heads, 1, 1, device=q.device)
                     expanded_mod = expanded_mod * phase_mod.mean(dim=1, keepdim=True)
