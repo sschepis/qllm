@@ -72,6 +72,9 @@ class TrainingConfig:
     # Distributed training
     distributed: bool = False
     local_rank: int = 0
+    
+    # Mixed precision training
+    use_mixed_precision: bool = False
 
 
 @dataclass
