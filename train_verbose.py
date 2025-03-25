@@ -54,19 +54,20 @@ def train_model_verbose():
         memory_key_dim=128
     )
     
-    # Training configuration with more frequent logging
+    # Training configuration with more frequent logging and memory optimizations
     training_config = TrainingConfig(
-        batch_size=16,
+        batch_size=8,    # Reduced batch size to prevent OOM errors
         learning_rate=5e-4,
         weight_decay=0.01,
-        max_epochs=25,  # Reduced to 25 epochs for faster training
+        max_epochs=25,   # Reduced to 25 epochs for faster training
         warmup_steps=100,
-        accumulation_steps=1,
-        save_steps=100,  # Save more frequently
-        eval_steps=50,   # Evaluate more frequently
+        accumulation_steps=4,  # Accumulate gradients over 4 batches (effective batch size = 32)
+        save_steps=100,   # Save more frequently
+        eval_steps=50,    # Evaluate more frequently
         entropy_regularization_weight=0.01,
         adapter_l2_penalty=0.001,
-        device="cuda" if torch.cuda.is_available() else "cpu"
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        use_mixed_precision=torch.cuda.is_available()  # Use mixed precision on CUDA devices
     )
     
     # Data configuration
