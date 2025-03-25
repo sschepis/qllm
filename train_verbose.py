@@ -232,11 +232,22 @@ def train_model_verbose():
             weight_decay=training_config.weight_decay
         )
         
-        # Load optimizer state
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        # Check if there were missing or unexpected keys in the model state dict
+        architecture_changed = hasattr(model, "_load_missing_keys") and bool(model._load_missing_keys)
         
-        # Print last loss
-        logger.info(f"Previous loss: {checkpoint['loss']:.4f}")
+        try:
+            # Only load optimizer state if model architecture is compatible
+            if not architecture_changed:
+                optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                logger.info("Loaded optimizer state from checkpoint")
+            else:
+                logger.warning("Model architecture changed - using fresh optimizer state")
+                
+            # Print last loss
+            logger.info(f"Previous loss: {checkpoint['loss']:.4f}")
+        except (ValueError, KeyError) as e:
+            logger.warning(f"Error loading optimizer state: {e}")
+            logger.warning("Using fresh optimizer state instead")
     else:
         # Initialize new model
         logger.info("Initializing new model...")
