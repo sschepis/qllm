@@ -190,68 +190,197 @@ def train_model_verbose():
     
     logger.info(f"Created dataloaders with {len(train_ds)} training samples and {len(val_ds)} validation samples")
     
-    # Check for existing checkpoints
+    # Check for existing checkpoints with enhanced search and recovery
     import glob
-    checkpoint_files = sorted(glob.glob(os.path.join(output_dir, "checkpoint_epoch_*.pt")))
+    import argparse
+    
+    # Try to parse command line args for checkpoint path (if running from command line)
+    parser = argparse.ArgumentParser(description="Training script with checkpoint loading")
+    parser.add_argument('--checkpoint', type=str, help='Path to specific checkpoint to load')
+    parser.add_argument('--ignore_checkpoints', action='store_true', help='Ignore existing checkpoints and start fresh')
+    
+    try:
+        args, _ = parser.parse_known_args()
+        checkpoint_path = args.checkpoint if hasattr(args, 'checkpoint') else None
+        ignore_checkpoints = args.ignore_checkpoints if hasattr(args, 'ignore_checkpoints') else False
+    except:
+        checkpoint_path = None
+        ignore_checkpoints = False
+    
+    # Function to attempt loading various checkpoint formats
+    def try_load_checkpoint(path):
+        try:
+            # Try standard PyTorch load first
+            return torch.load(path)
+        except Exception as e:
+            logger.warning(f"Standard loading failed for {path}: {e}")
+            
+            try:
+                # Try with map_location to CPU which can help with CUDA errors
+                return torch.load(path, map_location=torch.device('cpu'))
+            except Exception as e:
+                logger.warning(f"CPU map_location failed for {path}: {e}")
+                
+                try:
+                    # Try pickle loading with higher protocol version tolerance
+                    import pickle
+                    with open(path, 'rb') as f:
+                        return pickle.load(f)
+                except Exception as e:
+                    logger.warning(f"All loading methods failed for {path}: {e}")
+                    return None
     
     start_epoch = 0
-    if checkpoint_files:
-        # Find the latest checkpoint
-        latest_checkpoint = checkpoint_files[-1]
-        logger.info(f"Found checkpoint: {latest_checkpoint}")
-        
-        # Load the checkpoint
-        checkpoint = torch.load(latest_checkpoint)
-        
-        # Initialize model
-        logger.info("Loading existing model from checkpoint...")
-        model = SemanticResonanceModel(model_config)
-        
-        # Use strict=False to allow loading even with architecture changes
-        missing_keys, unexpected_keys = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-        
-        # Store missing keys information for later use
-        model._load_missing_keys = missing_keys
-        model._load_unexpected_keys = unexpected_keys
-        
-        # Log missing and unexpected keys for debugging
-        if missing_keys:
-            logger.warning(f"Missing keys in checkpoint: {missing_keys}")
-        if unexpected_keys:
-            logger.warning(f"Unexpected keys in checkpoint: {unexpected_keys}")
-            
-        model.to(device)
-        
-        # Get the epoch number from the checkpoint filename
-        import re
-        epoch_match = re.search(r'epoch_(\d+)\.pt', latest_checkpoint)
-        if epoch_match:
-            start_epoch = int(epoch_match.group(1))
-            logger.info(f"Resuming from epoch {start_epoch}")
-        
-        # Create optimizer
-        optimizer = AdamW(
-            model.parameters(),
-            lr=training_config.learning_rate,
-            weight_decay=training_config.weight_decay
-        )
-        
-        # Check if there were missing or unexpected keys in the model state dict
-        architecture_changed = hasattr(model, "_load_missing_keys") and bool(model._load_missing_keys)
-        
-        try:
-            # Only load optimizer state if model architecture is compatible
-            if not architecture_changed:
-                optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-                logger.info("Loaded optimizer state from checkpoint")
+    if not ignore_checkpoints:
+        # First check for specified checkpoint path
+        if checkpoint_path and os.path.exists(checkpoint_path):
+            logger.info(f"Loading specified checkpoint: {checkpoint_path}")
+            checkpoint = try_load_checkpoint(checkpoint_path)
+            if checkpoint:
+                logger.info(f"Successfully loaded specified checkpoint: {checkpoint_path}")
+                latest_checkpoint = checkpoint_path
             else:
-                logger.warning("Model architecture changed - using fresh optimizer state")
+                logger.error(f"Failed to load specified checkpoint: {checkpoint_path}")
+                latest_checkpoint = None
+                checkpoint = None
+        else:
+            # Look for various checkpoint formats in priority order
+            checkpoint_patterns = [
+                os.path.join(output_dir, "checkpoint_epoch_*.pt"),           # Standard checkpoints
+                os.path.join(output_dir, "model_only_epoch_*.pt"),           # Model-only fallbacks
+                os.path.join(os.path.dirname(output_dir), "emergency_save_epoch_*.pt")  # Emergency saves
+            ]
+            
+            checkpoint_files = []
+            for pattern in checkpoint_patterns:
+                checkpoint_files.extend(sorted(glob.glob(pattern)))
+            
+            if checkpoint_files:
+                # Find the latest checkpoint
+                latest_checkpoint = checkpoint_files[-1]
+                logger.info(f"Found checkpoint: {latest_checkpoint}")
                 
-            # Print last loss
-            logger.info(f"Previous loss: {checkpoint['loss']:.4f}")
-        except (ValueError, KeyError) as e:
-            logger.warning(f"Error loading optimizer state: {e}")
-            logger.warning("Using fresh optimizer state instead")
+                # Attempt to load the checkpoint with robust error handling
+                checkpoint = try_load_checkpoint(latest_checkpoint)
+                if not checkpoint:
+                    logger.error(f"Failed to load latest checkpoint: {latest_checkpoint}")
+                    # Try the second latest if available
+                    if len(checkpoint_files) > 1:
+                        latest_checkpoint = checkpoint_files[-2]
+                        logger.info(f"Trying second latest checkpoint: {latest_checkpoint}")
+                        checkpoint = try_load_checkpoint(latest_checkpoint)
+            else:
+                latest_checkpoint = None
+                checkpoint = None
+                logger.info("No existing checkpoints found.")
+        
+        if checkpoint is not None:
+            # Initialize model
+            logger.info("Loading existing model from checkpoint...")
+            model = SemanticResonanceModel(model_config)
+            
+            # Determine what kind of checkpoint we have based on the filename
+            is_full_checkpoint = "checkpoint_epoch_" in latest_checkpoint
+            is_model_only = "model_only_epoch_" in latest_checkpoint
+            is_emergency_save = "emergency_save_epoch_" in latest_checkpoint
+            
+            try:
+                # Get the model state dict based on checkpoint type
+                model_state = None
+                if is_full_checkpoint:
+                    try:
+                        model_state = checkpoint["model_state_dict"]
+                        logger.info("Found full checkpoint with model state dictionary")
+                    except (KeyError, TypeError) as e:
+                        logger.warning(f"Could not extract model_state_dict: {e}")
+                        # Maybe the checkpoint is just the model state
+                        if isinstance(checkpoint, dict) and len(checkpoint) > 10:  # Likely a state dict
+                            model_state = checkpoint
+                            logger.info("Checkpoint appears to be a raw state dictionary")
+                elif is_model_only or is_emergency_save:
+                    # For model_only or emergency saves, the checkpoint should be the model state directly
+                    model_state = checkpoint
+                    logger.info("Using model-only state dictionary from checkpoint")
+                else:
+                    # Unknown format - try a few approaches
+                    if isinstance(checkpoint, dict):
+                        if "model_state_dict" in checkpoint:
+                            model_state = checkpoint["model_state_dict"]
+                            logger.info("Found model_state_dict in checkpoint")
+                        else:
+                            # If it looks like a state dict itself (lots of tensor parameters)
+                            tensor_count = sum(1 for k, v in checkpoint.items() if isinstance(v, torch.Tensor))
+                            if tensor_count > 10:  # Arbitrary threshold suggesting it's a state dict
+                                model_state = checkpoint
+                                logger.info(f"Checkpoint appears to be a state dict ({tensor_count} tensors)")
+                
+                if model_state is not None:
+                    # Use strict=False to allow loading even with architecture changes
+                    missing_keys, unexpected_keys = model.load_state_dict(model_state, strict=False)
+                    
+                    # Store missing keys information for later use
+                    model._load_missing_keys = missing_keys
+                    model._load_unexpected_keys = unexpected_keys
+                    
+                    # Log missing and unexpected keys for debugging
+                    if missing_keys:
+                        logger.warning(f"Missing keys in checkpoint: {missing_keys}")
+                    if unexpected_keys:
+                        logger.warning(f"Unexpected keys in checkpoint: {unexpected_keys}")
+                        
+                    logger.info("Successfully loaded model weights")
+                else:
+                    logger.error("Could not find usable model state in checkpoint")
+                    raise ValueError("No model state found in checkpoint")
+                    
+            except Exception as e:
+                logger.error(f"Error loading model state: {e}")
+                # Create a fresh model if loading failed
+                model = SemanticResonanceModel(model_config)
+                logger.warning("Created fresh model due to loading error")
+                checkpoint = None  # Reset checkpoint to trigger fresh initialization
+            
+            model.to(device)
+            
+            if checkpoint is not None:  # Still have a valid checkpoint
+                # Get the epoch number from the checkpoint filename
+                import re
+                epoch_match = re.search(r'epoch_(\d+)\.pt', latest_checkpoint)
+                if epoch_match:
+                    start_epoch = int(epoch_match.group(1))
+                    logger.info(f"Resuming from epoch {start_epoch}")
+                
+                # Create optimizer
+                optimizer = AdamW(
+                    model.parameters(),
+                    lr=training_config.learning_rate,
+                    weight_decay=training_config.weight_decay
+                )
+                
+                # Check if there were missing or unexpected keys in the model state dict
+                architecture_changed = hasattr(model, "_load_missing_keys") and bool(model._load_missing_keys)
+                
+                # Only try to load optimizer state for full checkpoints
+                if is_full_checkpoint:
+                    try:
+                        # Only load optimizer state if model architecture is compatible
+                        if not architecture_changed:
+                            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                            logger.info("Loaded optimizer state from checkpoint")
+                        else:
+                            logger.warning("Model architecture changed - using fresh optimizer state")
+                    except (ValueError, KeyError, TypeError) as e:
+                        logger.warning(f"Error loading optimizer state: {e}")
+                        logger.warning("Using fresh optimizer state instead")
+                else:
+                    logger.info("Using fresh optimizer state with model-only checkpoint")
+                
+                # Print last loss if available
+                try:
+                    if "loss" in checkpoint:
+                        logger.info(f"Previous loss: {checkpoint['loss']:.4f}")
+                except (ValueError, KeyError, TypeError) as e:
+                    logger.warning(f"Could not access previous loss: {e}")
     else:
         # Initialize new model
         logger.info("Initializing new model...")
