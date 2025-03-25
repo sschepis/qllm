@@ -469,15 +469,51 @@ def train_model_verbose():
         avg_epoch_loss = epoch_loss / epoch_step
         logger.info(f"Epoch {epoch+1} completed. Average loss: {avg_epoch_loss:.4f}")
         
-        # Save checkpoint after each epoch
+        # Save checkpoint after each epoch with robust error handling
         checkpoint_path = os.path.join(output_dir, f"checkpoint_epoch_{epoch+1}.pt")
-        torch.save({
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "loss": avg_epoch_loss
-        }, checkpoint_path)
-        logger.info(f"Checkpoint saved to {checkpoint_path}")
+        
+        # Check available disk space
+        try:
+            import shutil
+            disk_stats = shutil.disk_usage(output_dir)
+            free_space_mb = disk_stats.free / (1024 * 1024)
+            logger.info(f"Available disk space: {free_space_mb:.2f} MB")
+            
+            if free_space_mb < 500:  # Less than 500MB available
+                logger.warning(f"Low disk space warning: {free_space_mb:.2f} MB available")
+        except Exception as e:
+            logger.warning(f"Could not check disk space: {e}")
+        
+        # Try to save the full checkpoint
+        try:
+            logger.info(f"Saving checkpoint to {checkpoint_path}")
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "loss": avg_epoch_loss
+            }, checkpoint_path)
+            logger.info(f"Checkpoint saved successfully to {checkpoint_path}")
+        except Exception as e:
+            logger.error(f"Error saving checkpoint: {e}")
+            
+            # Try to save just the model weights as a fallback
+            try:
+                model_only_path = os.path.join(output_dir, f"model_only_epoch_{epoch+1}.pt")
+                logger.info(f"Attempting to save model-only checkpoint to {model_only_path}")
+                torch.save(model.state_dict(), model_only_path)
+                logger.info(f"Model-only checkpoint saved successfully")
+            except Exception as e2:
+                logger.error(f"Could not save model-only checkpoint either: {e2}")
+                
+                # Final fallback: try to save at a different location
+                try:
+                    alt_path = os.path.join(os.path.dirname(output_dir), f"emergency_save_epoch_{epoch+1}.pt")
+                    logger.info(f"Final attempt: Saving model to alternative location: {alt_path}")
+                    torch.save(model.state_dict(), alt_path)
+                    logger.info(f"Emergency save successful at {alt_path}")
+                except Exception as e3:
+                    logger.error(f"All checkpoint saving methods failed: {e3}")
     
     # Final evaluation
     logger.info("Performing final evaluation...")
