@@ -60,12 +60,12 @@ def parse_verbose_args():
     # Training settings
     parser.add_argument("--max_epochs", type=int, default=25,
                        help="Maximum number of training epochs")
-    parser.add_argument("--batch_size", type=int, default=8,
-                       help="Training batch size")
+    parser.add_argument("--batch_size", type=int, default=4,
+                       help="Training batch size (reduced for full dataset)")
     parser.add_argument("--learning_rate", type=float, default=5e-4,
                        help="Learning rate")
-    parser.add_argument("--subset_size", type=int, default=1000,
-                       help="Number of examples to use (for faster iteration)")
+    parser.add_argument("--subset_size", type=int, default=None,
+                       help="Number of examples to use (defaults to full dataset)")
     
     # Logging settings
     parser.add_argument("--log_level", type=str, default="info",
@@ -178,8 +178,9 @@ def train_model_verbose():
     tokenizer = AutoTokenizer.from_pretrained(data_config.tokenizer_name)
     model_config.vocab_size = len(tokenizer)
     
-    # Create dataloaders with subset for faster training
-    logger.info("Loading dataset subset for faster training...")
+    # Create dataloaders with the full dataset
+    logger.info("Loading full dataset for comprehensive training...")
+    start_time = time.time()
     dataloaders = get_wikitext_dataloaders(
         tokenizer=tokenizer,
         batch_size=args.batch_size,
@@ -187,8 +188,26 @@ def train_model_verbose():
         stride=data_config.stride,
         num_workers=data_config.preprocessing_num_workers,
         cache_dir=data_config.cache_dir,
-        subset_size=args.subset_size
+        subset_size=None  # Use the entire dataset
     )
+    
+    # Log dataset loading time and size statistics
+    loading_time = time.time() - start_time
+    logger.info(f"Dataset loading completed in {loading_time:.2f} seconds")
+    
+    # Log dataset sizes
+    total_train_examples = len(dataloaders["train"].dataset)
+    total_val_examples = len(dataloaders["validation"].dataset) if "validation" in dataloaders else 0
+    total_test_examples = len(dataloaders["test"].dataset) if "test" in dataloaders else 0
+    
+    logger.info(f"Created dataloaders with {total_train_examples} training samples and {total_val_examples} validation samples")
+    
+    # Estimate memory usage
+    if torch.cuda.is_available():
+        # Report current GPU memory usage
+        allocated_memory = torch.cuda.memory_allocated() / 1024**2
+        max_memory = torch.cuda.get_device_properties(0).total_memory / 1024**2
+        logger.info(f"Current GPU memory usage: {allocated_memory:.2f}MB / {max_memory:.2f}MB")
     
     # Check for existing checkpoint
     if not args.ignore_checkpoints and not args.checkpoint_path:
