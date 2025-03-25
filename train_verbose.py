@@ -79,10 +79,15 @@ def train_model_verbose():
         cache_dir=".cache"
     )
     
-    # Output directory
+    # Output directory with explicit directory creation
     output_dir = "runs/verbose_training"
+    # Make sure all parent directories exist
+    if not os.path.exists("runs"):
+        os.makedirs("runs", exist_ok=True)
+    # Create the specific output directory
     os.makedirs(output_dir, exist_ok=True)
     training_config.output_dir = output_dir
+    logger.info(f"Saving checkpoints and model to {output_dir}")
     
     # Set device
     device = torch.device(training_config.device)
@@ -294,7 +299,7 @@ def train_model_verbose():
         for batch_idx, batch in enumerate(progress_bar):
             # Move batch to device
             batch = {k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask", "labels"]}
-            
+            # Standard single precision training
             # Forward pass
             outputs = model(**batch, return_dict=True)
             loss = outputs["loss"]
@@ -307,6 +312,22 @@ def train_model_verbose():
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 scheduler.step()
+                optimizer.zero_grad()
+            else:
+                # Standard single precision training
+                # Forward pass
+                outputs = model(**batch, return_dict=True)
+                loss = outputs["loss"]
+                
+                # Backward pass
+                loss.backward()
+                
+                # Optimizer step
+                if (batch_idx + 1) % training_config.accumulation_steps == 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
                 optimizer.zero_grad()
             
             # Update metrics
