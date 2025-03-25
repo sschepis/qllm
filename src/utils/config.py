@@ -32,6 +32,10 @@ class ModelConfig:
     memory_size: int = 64
     memory_key_dim: int = 128
     
+    # Pre-Manifest Resonance Layer settings
+    pre_manifest_iterations: int = 5
+    pre_manifest_entropy_threshold: float = 0.1
+    
     # FFN properties
     ff_dim: int = 3072
     activation: str = "gelu"

@@ -71,8 +71,14 @@ def parse_verbose_args():
     parser.add_argument("--phase_factor", type=float, default=0.1,
                        help="Phase modulation factor")
     
+    # Pre-Manifest Layer settings
+    parser.add_argument("--pre_manifest_iterations", type=int, default=5,
+                       help="Maximum iterations for pre-manifest layer")
+    parser.add_argument("--pre_manifest_entropy_threshold", type=float, default=0.1,
+                       help="Entropy threshold for pre-manifest layer")
+    
     # Training settings
-    parser.add_argument("--max_epochs", type=int, default=25,
+    parser.add_argument("--max_epochs", type=int, default=100,
                        help="Maximum number of training epochs")
     parser.add_argument("--batch_size", type=int, default=4,
                        help="Training batch size (reduced for full dataset)")
@@ -186,6 +192,10 @@ def train_model_verbose():
     model_config.enable_hcw = args.enable_hcw
     model_config.memory_size = args.memory_size
     model_config.memory_key_dim = args.memory_key_dim
+    
+    # Pre-Manifest Layer settings
+    model_config.pre_manifest_iterations = args.pre_manifest_iterations
+    model_config.pre_manifest_entropy_threshold = args.pre_manifest_entropy_threshold
     
     # Update training config from args
     training_config.max_epochs = args.max_epochs
