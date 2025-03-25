@@ -1,386 +1,259 @@
 #!/usr/bin/env python3
 """
-Training script with verbose output for Semantic Resonance Language Model.
+Verbose training script for the Quantum Resonance Language Model.
 
-This script provides more detailed updates during training.
+This script provides detailed logging and visualization of the
+training process, especially for the resonance attention mechanism.
+It's primarily used for debugging and understanding the model.
 """
 
 import os
-import torch
-from transformers import AutoTokenizer
+import sys
+import time
+import argparse
 import logging
-from tqdm import tqdm
-from torch.optim import AdamW
-from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import DataLoader
+import torch
+import torch.nn as nn
+from tqdm.auto import tqdm
+from transformers import AutoTokenizer
 
-from src.config import ModelConfig, TrainingConfig, DataConfig
-from src.model.semantic_resonance_model import SemanticResonanceModel
-from src.data.wikitext_dataset import get_wikitext_dataloaders
-from src.training.trainer import Trainer
-from src.evaluation.metrics import compute_perplexity, compute_entropy_stats
+# Import from project modules
+from src.utils.logging import setup_logger
+from src.utils.device import get_device, print_device_info
+from src.utils.config import ModelConfig, TrainingConfig, DataConfig
+from src.utils.config import get_default_configs, save_configs
+from src.model.semantic_resonance_model import SemanticResonanceModel 
+from src.data.dataloaders import get_wikitext_dataloaders, compute_perplexity
+from src.training.checkpoint import load_checkpoint, save_checkpoint, find_latest_checkpoint
 
 
-def setup_logging():
-    """Set up logging configuration."""
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO
+def parse_verbose_args():
+    """Parse command line arguments for verbose training."""
+    parser = argparse.ArgumentParser(description="Verbose Quantum Resonance Model Training")
+    
+    # Basic configuration
+    parser.add_argument("--output_dir", type=str, default="runs/verbose_training",
+                        help="Output directory for model and logs")
+    parser.add_argument("--checkpoint_path", type=str, default=None,
+                        help="Path to model checkpoint")
+    parser.add_argument("--ignore_checkpoints", action="store_true",
+                        help="Ignore existing checkpoints and start fresh")
+    
+    # Model configuration
+    parser.add_argument("--hidden_dim", type=int, default=256,
+                       help="Size of hidden dimensions")
+    parser.add_argument("--num_layers", type=int, default=4,
+                       help="Number of transformer layers")
+    parser.add_argument("--num_heads", type=int, default=4,
+                       help="Number of attention heads")
+    
+    # Resonance settings
+    parser.add_argument("--max_iterations", type=int, default=10,
+                       help="Maximum number of resonance iterations")
+    parser.add_argument("--resonance_epsilon", type=float, default=0.1,
+                       help="Convergence threshold for resonance")
+    parser.add_argument("--resonance_momentum", type=float, default=0.2,
+                       help="Momentum for resonance updates")
+    parser.add_argument("--phase_factor", type=float, default=0.1,
+                       help="Phase modulation factor")
+    
+    # Training settings
+    parser.add_argument("--max_epochs", type=int, default=25,
+                       help="Maximum number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=8,
+                       help="Training batch size")
+    parser.add_argument("--learning_rate", type=float, default=5e-4,
+                       help="Learning rate")
+    parser.add_argument("--subset_size", type=int, default=1000,
+                       help="Number of examples to use (for faster iteration)")
+    
+    # Logging settings
+    parser.add_argument("--log_level", type=str, default="info",
+                       choices=["debug", "info", "warning", "error"],
+                       help="Logging level")
+    parser.add_argument("--log_metrics_every", type=int, default=10,
+                       help="Log metrics every N batches")
+    parser.add_argument("--log_entropy_every", type=int, default=300,
+                       help="Log detailed entropy stats every N batches")
+    parser.add_argument("--log_samples", action="store_true",
+                       help="Generate text samples during training")
+    parser.add_argument("--log_layer_outputs", action="store_true",
+                       help="Log detailed layer outputs (very verbose)")
+    
+    return parser.parse_args()
+
+
+def setup_training_environment(args):
+    """Set up the training environment."""
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Set up logging
+    log_file = os.path.join(args.output_dir, "verbose_training.log")
+    logger = setup_logger(
+        name="quantum_resonance",
+        log_file=log_file,
+        log_level=getattr(logging, args.log_level.upper())
     )
-    return logging.getLogger(__name__)
+    
+    # Log start
+    logger.info("Starting training with verbose output")
+    logger.info(f"Saving checkpoints and model to {args.output_dir}")
+    
+    # Get device
+    device = get_device()
+    logger.info(f"Using device: {device}")
+    
+    # Set random seed
+    torch.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(42)
+    
+    return logger, device
+
+
+def log_layer_entropy_stats(model, prefix=""):
+    """Log detailed entropy statistics for each ResonanceAttention layer."""
+    logger = logging.getLogger("quantum_resonance")
+    
+    # Find all ResonanceAttention layers
+    for i, layer in enumerate(model.transformer.h):
+        attention = layer.attn
+        if not hasattr(attention, 'entropy_history'):
+            continue
+            
+        # Log entropy history for this layer
+        logger.info(f"=== Layer {i} Entropy History ===")
+        for j, entropy in enumerate(attention.entropy_history):
+            logger.info(f"  Iteration {j+1}: Mean Entropy = {entropy:.4f}")
+        
+        # Log summary statistics
+        if len(attention.entropy_history) > 1:
+            initial = attention.entropy_history[0]
+            final = attention.entropy_history[-1]
+            reduction = initial - final
+            reduction_pct = (reduction / initial) * 100
+            
+            logger.info(f"  Total Entropy Reduction: {reduction:.4f} ({reduction_pct:.2f}%)")
+            
+            # Convergence gap
+            if hasattr(attention, 'convergence_gap'):
+                logger.info(f"  Convergence Gap: {attention.convergence_gap:.4f} (Threshold: {attention.epsilon:.4f})")
 
 
 def train_model_verbose():
-    """Train the model with verbose output."""
-    logger = setup_logging()
-    logger.info("Starting training with verbose output")
+    """Train model with verbose logging of the quantum resonance process."""
+    # Parse arguments
+    args = parse_verbose_args()
     
-    # Model configuration
-    model_config = ModelConfig(
-        vocab_size=30000,  # Will be updated based on tokenizer
-        hidden_dim=192,
-        num_layers=4,
-        num_heads=8,
-        max_seq_length=512,
-        dropout=0.1,
-        primes=[24, 24, 24, 24, 24, 24, 24, 24],
-        base_dim=384,  # Larger base dimension for better embedding
-        max_iterations=10,
-        entropy_threshold=0.1,
-        use_prime_mask=True,
-        enable_hcw=True,
-        memory_size=1000,
-        memory_key_dim=128
-    )
+    # Set up training environment
+    logger, device = setup_training_environment(args)
     
-    # Training configuration with more frequent logging and memory optimizations
-    training_config = TrainingConfig(
-        batch_size=8,    # Reduced batch size to prevent OOM errors
-        learning_rate=5e-4,
-        weight_decay=0.01,
-        max_epochs=25,   # Reduced to 25 epochs for faster training
-        warmup_steps=100,
-        accumulation_steps=4,  # Accumulate gradients over 4 batches (effective batch size = 32)
-        save_steps=100,   # Save more frequently
-        eval_steps=50,    # Evaluate more frequently
-        entropy_regularization_weight=0.01,
-        adapter_l2_penalty=0.001,
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        use_mixed_precision=torch.cuda.is_available()  # Use mixed precision on CUDA devices
-    )
+    # Initialize configurations
+    configs = get_default_configs()
+    model_config = configs["model"]
+    training_config = configs["training"]
+    data_config = configs["data"]
     
-    # Data configuration
-    data_config = DataConfig(
-        dataset_name="wikitext-103-raw-v1",
-        tokenizer_name="gpt2",
-        max_length=512,
-        stride=256,
-        cache_dir=".cache"
-    )
+    # Update model config from args
+    model_config.hidden_dim = args.hidden_dim
+    model_config.num_layers = args.num_layers
+    model_config.num_heads = args.num_heads
+    model_config.max_iterations = args.max_iterations
+    model_config.resonance_epsilon = args.resonance_epsilon
+    model_config.resonance_momentum = args.resonance_momentum
+    model_config.phase_factor = args.phase_factor
     
-    # Output directory with explicit directory creation
-    output_dir = "runs/verbose_training"
-    # Make sure all parent directories exist
-    if not os.path.exists("runs"):
-        os.makedirs("runs", exist_ok=True)
-    # Create the specific output directory
-    os.makedirs(output_dir, exist_ok=True)
-    training_config.output_dir = output_dir
-    logger.info(f"Saving checkpoints and model to {output_dir}")
+    # Update training config from args
+    training_config.max_epochs = args.max_epochs
+    training_config.batch_size = args.batch_size
+    training_config.learning_rate = args.learning_rate
+    training_config.output_dir = args.output_dir
     
-    # Set device
-    device = torch.device(training_config.device)
-    logger.info(f"Using device: {device}")
+    # Save configurations
+    save_configs(configs, args.output_dir)
     
     # Initialize tokenizer
     logger.info("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(data_config.tokenizer_name)
-    tokenizer.pad_token = tokenizer.eos_token
-    
-    # Update vocabulary size
     model_config.vocab_size = len(tokenizer)
     
-    # Custom collate function to handle variable-length sequences
-    def collate_fn(batch):
-        """Collate function for padding sequences in a batch."""
-        # Get batch elements
-        input_ids = [item["input_ids"] for item in batch]
-        attention_mask = [item["attention_mask"] for item in batch]
-        labels = [item["labels"] for item in batch]
-        
-        # Pad sequences to the same length
-        input_ids_padded = pad_sequence(input_ids, batch_first=True, padding_value=tokenizer.pad_token_id)
-        attention_mask_padded = pad_sequence(attention_mask, batch_first=True, padding_value=0)
-        labels_padded = pad_sequence(labels, batch_first=True, padding_value=-100)  # -100 is ignored in loss
-        
-        return {
-            "input_ids": input_ids_padded,
-            "attention_mask": attention_mask_padded,
-            "labels": labels_padded
-        }
-    
-    # Load a smaller subset of the dataset for faster training
+    # Create dataloaders with subset for faster training
     logger.info("Loading dataset subset for faster training...")
-    from datasets import load_dataset
-    
-    # Load a larger portion of the train dataset for better learning
-    train_dataset = load_dataset(
-        "wikitext",
-        "wikitext-103-raw-v1",
-        split="train[:10000]",  # Use 10000 examples (10x more data)
-        cache_dir=data_config.cache_dir
-    )
-    
-    # Load the validation dataset
-    val_dataset = load_dataset(
-        "wikitext",
-        "wikitext-103-raw-v1",
-        split="validation[:500]",  # Use 500 examples for validation
-        cache_dir=data_config.cache_dir
-    )
-    
-    # Create custom WikiTextDataset instances
-    from src.data.wikitext_dataset import WikiTextDataset
-    
-    # Use the existing collate function
-    from src.data.wikitext_dataset import collate_fn
-    
-    # Create datasets
-    train_ds = WikiTextDataset(
+    dataloaders = get_wikitext_dataloaders(
         tokenizer=tokenizer,
-        split="train",
+        batch_size=args.batch_size,
         max_length=data_config.max_length,
         stride=data_config.stride,
-        return_tensors=True,
-        dataset=train_dataset  # Pass the dataset directly
+        num_workers=data_config.preprocessing_num_workers,
+        cache_dir=data_config.cache_dir,
+        subset_size=args.subset_size
     )
     
-    val_ds = WikiTextDataset(
-        tokenizer=tokenizer,
-        split="validation",
-        max_length=data_config.max_length,
-        stride=data_config.stride,
-        return_tensors=True,
-        dataset=val_dataset  # Pass the dataset directly
-    )
+    # Check for existing checkpoint
+    if not args.ignore_checkpoints and not args.checkpoint_path:
+        args.checkpoint_path = find_latest_checkpoint(args.output_dir)
+        if args.checkpoint_path:
+            logger.info(f"Found checkpoint: {args.checkpoint_path}")
     
-    # Create dataloaders
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=training_config.batch_size,
-        shuffle=True,
-        num_workers=0,  # Avoid multiprocessing issues
-        collate_fn=collate_fn
-    )
-    
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=training_config.batch_size,
-        shuffle=False,
-        num_workers=0,  # Avoid multiprocessing issues
-        collate_fn=collate_fn
-    )
-    
-    # Create a dictionary of dataloaders
-    dataloaders = {
-        "train": train_loader,
-        "validation": val_loader
-    }
-    
-    logger.info(f"Created dataloaders with {len(train_ds)} training samples and {len(val_ds)} validation samples")
-    
-    # Check for existing checkpoints with enhanced search and recovery
-    import glob
-    import argparse
-    
-    # Try to parse command line args for checkpoint path (if running from command line)
-    parser = argparse.ArgumentParser(description="Training script with checkpoint loading")
-    parser.add_argument('--checkpoint', type=str, help='Path to specific checkpoint to load')
-    parser.add_argument('--ignore_checkpoints', action='store_true', help='Ignore existing checkpoints and start fresh')
-    
-    try:
-        args, _ = parser.parse_known_args()
-        checkpoint_path = args.checkpoint if hasattr(args, 'checkpoint') else None
-        ignore_checkpoints = args.ignore_checkpoints if hasattr(args, 'ignore_checkpoints') else False
-    except:
-        checkpoint_path = None
-        ignore_checkpoints = False
-    
-    # Function to attempt loading various checkpoint formats
-    def try_load_checkpoint(path):
-        try:
-            # Try standard PyTorch load first
-            return torch.load(path)
-        except Exception as e:
-            logger.warning(f"Standard loading failed for {path}: {e}")
-            
-            try:
-                # Try with map_location to CPU which can help with CUDA errors
-                return torch.load(path, map_location=torch.device('cpu'))
-            except Exception as e:
-                logger.warning(f"CPU map_location failed for {path}: {e}")
-                
-                try:
-                    # Try pickle loading with higher protocol version tolerance
-                    import pickle
-                    with open(path, 'rb') as f:
-                        return pickle.load(f)
-                except Exception as e:
-                    logger.warning(f"All loading methods failed for {path}: {e}")
-                    return None
-    
-    start_epoch = 0
-    if not ignore_checkpoints:
-        # First check for specified checkpoint path
-        if checkpoint_path and os.path.exists(checkpoint_path):
-            logger.info(f"Loading specified checkpoint: {checkpoint_path}")
-            checkpoint = try_load_checkpoint(checkpoint_path)
-            if checkpoint:
-                logger.info(f"Successfully loaded specified checkpoint: {checkpoint_path}")
-                latest_checkpoint = checkpoint_path
-            else:
-                logger.error(f"Failed to load specified checkpoint: {checkpoint_path}")
-                latest_checkpoint = None
-                checkpoint = None
-        else:
-            # Look for various checkpoint formats in priority order
-            checkpoint_patterns = [
-                os.path.join(output_dir, "checkpoint_epoch_*.pt"),           # Standard checkpoints
-                os.path.join(output_dir, "model_only_epoch_*.pt"),           # Model-only fallbacks
-                os.path.join(os.path.dirname(output_dir), "emergency_save_epoch_*.pt")  # Emergency saves
-            ]
-            
-            checkpoint_files = []
-            for pattern in checkpoint_patterns:
-                checkpoint_files.extend(sorted(glob.glob(pattern)))
-            
-            if checkpoint_files:
-                # Find the latest checkpoint
-                latest_checkpoint = checkpoint_files[-1]
-                logger.info(f"Found checkpoint: {latest_checkpoint}")
-                
-                # Attempt to load the checkpoint with robust error handling
-                checkpoint = try_load_checkpoint(latest_checkpoint)
-                if not checkpoint:
-                    logger.error(f"Failed to load latest checkpoint: {latest_checkpoint}")
-                    # Try the second latest if available
-                    if len(checkpoint_files) > 1:
-                        latest_checkpoint = checkpoint_files[-2]
-                        logger.info(f"Trying second latest checkpoint: {latest_checkpoint}")
-                        checkpoint = try_load_checkpoint(latest_checkpoint)
-            else:
-                latest_checkpoint = None
-                checkpoint = None
-                logger.info("No existing checkpoints found.")
+    # Initialize model
+    if args.checkpoint_path and os.path.exists(args.checkpoint_path):
+        logger.info("Loading existing model from checkpoint...")
+        model = SemanticResonanceModel(model_config)
         
-        if checkpoint is not None:
-            # Initialize model
-            logger.info("Loading existing model from checkpoint...")
-            model = SemanticResonanceModel(model_config)
+        # Load checkpoint
+        checkpoint = torch.load(args.checkpoint_path, map_location=device)
+        
+        # Get epoch number from the checkpoint filename
+        import re
+        epoch_match = re.search(r'epoch_(\d+)\.pt', args.checkpoint_path)
+        if epoch_match:
+            start_epoch = int(epoch_match.group(1))
+            logger.info(f"Resuming from epoch {start_epoch}")
+        else:
+            start_epoch = 0
+        
+        # Load model state dict
+        missing_keys, unexpected_keys = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        
+        # Log missing and unexpected keys
+        if missing_keys:
+            logger.warning(f"Missing keys in checkpoint: {missing_keys}")
+        if unexpected_keys:
+            logger.warning(f"Unexpected keys in checkpoint: {unexpected_keys}")
+        
+        model.to(device)
+        
+        # Create optimizer
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=training_config.learning_rate,
+            weight_decay=training_config.weight_decay
+        )
+        
+        # Load optimizer state
+        try:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            logger.info("Loaded optimizer state from checkpoint")
             
-            # Determine what kind of checkpoint we have based on the filename
-            is_full_checkpoint = "checkpoint_epoch_" in latest_checkpoint
-            is_model_only = "model_only_epoch_" in latest_checkpoint
-            is_emergency_save = "emergency_save_epoch_" in latest_checkpoint
+            # Print last loss
+            logger.info(f"Previous loss: {checkpoint['loss']:.4f}")
+        except (ValueError, KeyError) as e:
+            logger.warning(f"Error loading optimizer state: {e}")
+            logger.warning("Using fresh optimizer state instead")
             
-            try:
-                # Get the model state dict based on checkpoint type
-                model_state = None
-                if is_full_checkpoint:
-                    try:
-                        model_state = checkpoint["model_state_dict"]
-                        logger.info("Found full checkpoint with model state dictionary")
-                    except (KeyError, TypeError) as e:
-                        logger.warning(f"Could not extract model_state_dict: {e}")
-                        # Maybe the checkpoint is just the model state
-                        if isinstance(checkpoint, dict) and len(checkpoint) > 10:  # Likely a state dict
-                            model_state = checkpoint
-                            logger.info("Checkpoint appears to be a raw state dictionary")
-                elif is_model_only or is_emergency_save:
-                    # For model_only or emergency saves, the checkpoint should be the model state directly
-                    model_state = checkpoint
-                    logger.info("Using model-only state dictionary from checkpoint")
-                else:
-                    # Unknown format - try a few approaches
-                    if isinstance(checkpoint, dict):
-                        if "model_state_dict" in checkpoint:
-                            model_state = checkpoint["model_state_dict"]
-                            logger.info("Found model_state_dict in checkpoint")
-                        else:
-                            # If it looks like a state dict itself (lots of tensor parameters)
-                            tensor_count = sum(1 for k, v in checkpoint.items() if isinstance(v, torch.Tensor))
-                            if tensor_count > 10:  # Arbitrary threshold suggesting it's a state dict
-                                model_state = checkpoint
-                                logger.info(f"Checkpoint appears to be a state dict ({tensor_count} tensors)")
-                
-                if model_state is not None:
-                    # Use strict=False to allow loading even with architecture changes
-                    missing_keys, unexpected_keys = model.load_state_dict(model_state, strict=False)
-                    
-                    # Store missing keys information for later use
-                    model._load_missing_keys = missing_keys
-                    model._load_unexpected_keys = unexpected_keys
-                    
-                    # Log missing and unexpected keys for debugging
-                    if missing_keys:
-                        logger.warning(f"Missing keys in checkpoint: {missing_keys}")
-                    if unexpected_keys:
-                        logger.warning(f"Unexpected keys in checkpoint: {unexpected_keys}")
-                        
-                    logger.info("Successfully loaded model weights")
-                else:
-                    logger.error("Could not find usable model state in checkpoint")
-                    raise ValueError("No model state found in checkpoint")
-                    
-            except Exception as e:
-                logger.error(f"Error loading model state: {e}")
-                # Create a fresh model if loading failed
-                model = SemanticResonanceModel(model_config)
-                logger.warning("Created fresh model due to loading error")
-                checkpoint = None  # Reset checkpoint to trigger fresh initialization
-            
-            model.to(device)
-            
-            if checkpoint is not None:  # Still have a valid checkpoint
-                # Get the epoch number from the checkpoint filename
-                import re
-                epoch_match = re.search(r'epoch_(\d+)\.pt', latest_checkpoint)
-                if epoch_match:
-                    start_epoch = int(epoch_match.group(1))
-                    logger.info(f"Resuming from epoch {start_epoch}")
-                
-                # Create optimizer
-                optimizer = AdamW(
-                    model.parameters(),
-                    lr=training_config.learning_rate,
-                    weight_decay=training_config.weight_decay
-                )
-                
-                # Check if there were missing or unexpected keys in the model state dict
-                architecture_changed = hasattr(model, "_load_missing_keys") and bool(model._load_missing_keys)
-                
-                # Only try to load optimizer state for full checkpoints
-                if is_full_checkpoint:
-                    try:
-                        # Only load optimizer state if model architecture is compatible
-                        if not architecture_changed:
-                            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-                            logger.info("Loaded optimizer state from checkpoint")
-                        else:
-                            logger.warning("Model architecture changed - using fresh optimizer state")
-                    except (ValueError, KeyError, TypeError) as e:
-                        logger.warning(f"Error loading optimizer state: {e}")
-                        logger.warning("Using fresh optimizer state instead")
-                else:
-                    logger.info("Using fresh optimizer state with model-only checkpoint")
-                
-                # Print last loss if available
-                try:
-                    if "loss" in checkpoint:
-                        logger.info(f"Previous loss: {checkpoint['loss']:.4f}")
-                except (ValueError, KeyError, TypeError) as e:
-                    logger.warning(f"Could not access previous loss: {e}")
+        # Create scheduler
+        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=training_config.max_epochs * len(dataloaders["train"]),
+            eta_min=1e-6
+        )
+        
+        # Adjust for resumed training
+        if start_epoch > 0:
+            logger.info(f"Adjusting scheduler for resumed training from epoch {start_epoch}")
+            for _ in range(start_epoch * len(dataloaders["train"])):
+                lr_scheduler.step()
     else:
         # Initialize new model
         logger.info("Initializing new model...")
@@ -388,194 +261,125 @@ def train_model_verbose():
         model.to(device)
         
         # Create optimizer
-        optimizer = AdamW(
+        optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=training_config.learning_rate,
             weight_decay=training_config.weight_decay
         )
+        
+        # Create scheduler
+        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=training_config.max_epochs * len(dataloaders["train"]),
+            eta_min=1e-6
+        )
+        
+        start_epoch = 0
     
     # Print model size
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Model size: {total_params:,} parameters ({trainable_params:,} trainable)")
     
+    # Training steps per epoch
+    steps_per_epoch = len(dataloaders["train"])
+    logger.info(f"Training steps per epoch: {steps_per_epoch}")
+    
     # Training loop
     logger.info("Starting training...")
     model.train()
     
-    # Calculate the number of training steps per epoch
-    train_steps_per_epoch = len(dataloaders["train"])
-    logger.info(f"Training steps per epoch: {train_steps_per_epoch}")
+    # Use AMP for mixed precision training
+    scaler = torch.cuda.amp.GradScaler()
     
-    # Use a cosine annealing scheduler with warmup
-    from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-
-    # Create a warmup phase that increases the learning rate linearly
-    warmup_scheduler = LinearLR(
-        optimizer,
-        start_factor=0.1,  # Start at 10% of the base learning rate
-        end_factor=1.0,    # Reach the full learning rate
-        total_iters=train_steps_per_epoch * 2  # Warmup for 2 epochs
-    )
-    
-    # Then use cosine annealing to gradually reduce learning rate
-    cosine_scheduler = CosineAnnealingLR(
-        optimizer,
-        T_max=train_steps_per_epoch * (training_config.max_epochs - 2),  # Remaining epochs
-        eta_min=1e-6  # Minimum learning rate at the end
-    )
-    
-    # Combine both schedulers in sequence
-    scheduler = SequentialLR(
-        optimizer,
-        schedulers=[warmup_scheduler, cosine_scheduler],
-        milestones=[train_steps_per_epoch * 2]  # Switch after 2 epochs
-    )
-    
-    # Update scheduler setup to handle resuming from checkpoint
-    if start_epoch > 0:
-        logger.info(f"Adjusting scheduler for resumed training from epoch {start_epoch}")
-        # Skip steps that would have happened in previous epochs
-        for _ in range(start_epoch * train_steps_per_epoch):
-            scheduler.step()
-    
-    for epoch in range(start_epoch, training_config.max_epochs):
+    # Train for specified number of epochs
+    for epoch in range(start_epoch, args.max_epochs):
+        epoch_start_time = time.time()
         epoch_loss = 0.0
         epoch_step = 0
         
-        progress_bar = tqdm(
+        # Create progress bar
+        train_iterator = tqdm(
             dataloaders["train"],
-            desc=f"Epoch {epoch + 1}/{training_config.max_epochs}",
+            desc=f"Epoch {epoch+1}/{args.max_epochs}",
             leave=True
         )
         
-        for batch_idx, batch in enumerate(progress_bar):
+        for batch_idx, batch in enumerate(train_iterator):
             # Move batch to device
             batch = {k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask", "labels"]}
-            # Standard single precision training
-            # Forward pass
-            outputs = model(**batch, return_dict=True)
-            loss = outputs["loss"]
             
-            # Backward pass
-            loss.backward()
-            
-            # Optimizer step
-            if (batch_idx + 1) % training_config.accumulation_steps == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
-            else:
-                # Standard single precision training
-                # Forward pass
+            # Forward pass with AMP
+            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
                 outputs = model(**batch, return_dict=True)
                 loss = outputs["loss"]
-                
-                # Backward pass
-                loss.backward()
-                
-                # Optimizer step
-                if (batch_idx + 1) % training_config.accumulation_steps == 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    optimizer.step()
-                    scheduler.step()
-                    optimizer.zero_grad()
-                optimizer.zero_grad()
             
-            # Update metrics
+            # Backward pass with gradient scaling
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            
+            # Optimizer step
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+            
+            # LR scheduler step
+            lr_scheduler.step()
+            
+            # Update statistics
             epoch_loss += loss.item()
             epoch_step += 1
             
-            # Log detailed statistics every 10 batches
-            if batch_idx % 10 == 0:
-                # Extract entropy and iteration information
-                entropy_stats = compute_entropy_stats(outputs)
-                
-                # Log statistics
-                current_lr = scheduler.get_last_lr()[0]
-                
-                log_msg = f"Epoch {epoch+1}, Batch {batch_idx}/{len(progress_bar)}, "
-                log_msg += f"Loss: {loss.item():.4f}, LR: {current_lr:.6f}"
-                
-                if "mean_entropy" in entropy_stats:
-                    log_msg += f", Entropy: {entropy_stats['mean_entropy']:.4f}"
-                
-                if "mean_iterations" in entropy_stats:
-                    log_msg += f", Avg Iter: {entropy_stats['mean_iterations']:.2f}"
-                
-                if "mean_convergence_gap" in entropy_stats:
-                    log_msg += f", Gap: {entropy_stats['mean_convergence_gap']:.4f}"
-                
-                if "entropy_threshold" in entropy_stats:
-                    log_msg += f", Threshold: {entropy_stats['entropy_threshold']:.4f}"
-                
-                logger.info(log_msg)
-                
-                # Log detailed entropy history for the first batch of each 5 epochs
-                if batch_idx == 0 and (epoch % 5 == 0 or epoch < 5):
-                    if "metadata" in outputs and outputs["metadata"]:
-                        layer_data = []
-                        # Collect data from each layer
-                        for meta in outputs["metadata"]:
-                            if "metadata" in meta and "entropy_history" in meta["metadata"]:
-                                history = meta["metadata"]["entropy_history"]
-                                layer_name = meta.get("layer", "unknown")
-                                
-                                # Log the per-iteration entropy values
-                                logger.info(f"=== Layer {layer_name} Entropy History ===")
-                                for iter_data in history:
-                                    iteration = iter_data["iteration"]
-                                    mean_ent = iter_data["mean_entropy"].mean().item()
-                                    logger.info(f"  Iteration {iteration}: Mean Entropy = {mean_ent:.4f}")
-                                
-                                # Calculate and log entropy reduction rate
-                                if len(history) > 1:
-                                    first_ent = history[0]["mean_entropy"].mean().item()
-                                    last_ent = history[-1]["mean_entropy"].mean().item()
-                                    reduction = first_ent - last_ent
-                                    pct_reduction = (reduction / first_ent) * 100 if first_ent != 0 else 0
-                                    logger.info(f"  Total Entropy Reduction: {reduction:.4f} ({pct_reduction:.2f}%)")
-                                    
-                                    # Check if close to convergence
-                                    threshold = meta["metadata"].get("entropy_threshold", 0.1)
-                                    gap = last_ent - threshold
-                                    logger.info(f"  Convergence Gap: {gap:.4f} (Threshold: {threshold:.4f})")
-                
-                # Update progress bar
-                progress_bar.set_postfix({
-                    "loss": f"{loss.item():.4f}",
-                    "avg_loss": f"{epoch_loss/epoch_step:.4f}",
-                    "lr": f"{current_lr:.6f}"
-                })
+            # Update progress bar
+            lr = lr_scheduler.get_last_lr()[0]
+            train_iterator.set_postfix(loss=loss.item(), avg_loss=epoch_loss/epoch_step, lr=lr)
             
-            # Evaluate model
-            if batch_idx > 0 and batch_idx % 50 == 0:
-                logger.info("Evaluating on validation set...")
+            # Log training metrics
+            if batch_idx % args.log_metrics_every == 0:
+                # Get entropy details
+                avg_iterations = 0
+                avg_entropy = 0.0
+                avg_gap = 0.0
+                avg_threshold = 0.0
+                
+                count = 0
+                for layer in model.transformer.h:
+                    if hasattr(layer.attn, 'last_iterations'):
+                        avg_iterations += layer.attn.last_iterations
+                        count += 1
+                    if hasattr(layer.attn, 'last_entropy'):
+                        avg_entropy += layer.attn.last_entropy
+                    if hasattr(layer.attn, 'convergence_gap'):
+                        avg_gap += layer.attn.convergence_gap
+                    if hasattr(layer.attn, 'epsilon'):
+                        avg_threshold += layer.attn.epsilon
+                
+                if count > 0:
+                    avg_iterations /= count
+                    avg_entropy /= count
+                    avg_gap /= count
+                    avg_threshold /= count
+                
+                logger.info(f"Epoch {epoch+1}, Batch {batch_idx}/{steps_per_epoch}, "
+                           f"Loss: {loss.item():.4f}, LR: {lr:.6f}, "
+                           f"Entropy: {avg_entropy:.4f}, Avg Iter: {avg_iterations:.2f}, "
+                           f"Gap: {avg_gap:.4f}, Threshold: {avg_threshold:.4f}")
+                
+                # Log detailed entropy statistics periodically
+                if batch_idx % args.log_entropy_every == 0:
+                    log_layer_entropy_stats(model)
+            
+            # Generate text samples if requested
+            if args.log_samples and batch_idx % 500 == 0 and batch_idx > 0:
                 model.eval()
                 
-                val_loss = 0.0
-                val_steps = 0
+                # Generate from a simple prompt
+                prompt = "The quantum theory of resonance suggests that"
                 
                 with torch.no_grad():
-                    val_progress = tqdm(dataloaders["validation"], desc="Validation", leave=False)
-                    for val_batch in val_progress:
-                        val_batch = {k: v.to(device) for k, v in val_batch.items() if k in ["input_ids", "attention_mask", "labels"]}
-                        val_outputs = model(**val_batch, return_dict=True)
-                        val_loss += val_outputs["loss"].item()
-                        val_steps += 1
-                
-                avg_val_loss = val_loss / val_steps
-                val_ppl = compute_perplexity(avg_val_loss)
-                
-                logger.info(f"Validation Loss: {avg_val_loss:.4f}, Perplexity: {val_ppl:.2f}")
-                
-                # Generate a sample
-                if batch_idx % 200 == 0:
-                    logger.info("Generating sample text...")
-                    model.eval()
-                    
-                    prompt = "In the future, artificial intelligence will"
                     input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
                     
                     with torch.no_grad():
@@ -598,13 +402,13 @@ def train_model_verbose():
         avg_epoch_loss = epoch_loss / epoch_step
         logger.info(f"Epoch {epoch+1} completed. Average loss: {avg_epoch_loss:.4f}")
         
-        # Save checkpoint after each epoch with robust error handling
-        checkpoint_path = os.path.join(output_dir, f"checkpoint_epoch_{epoch+1}.pt")
+        # Save checkpoint after each epoch
+        checkpoint_path = os.path.join(args.output_dir, f"checkpoint_epoch_{epoch+1}.pt")
         
         # Check available disk space
         try:
             import shutil
-            disk_stats = shutil.disk_usage(output_dir)
+            disk_stats = shutil.disk_usage(args.output_dir)
             free_space_mb = disk_stats.free / (1024 * 1024)
             logger.info(f"Available disk space: {free_space_mb:.2f} MB")
             
@@ -628,7 +432,7 @@ def train_model_verbose():
             
             # Try to save just the model weights as a fallback
             try:
-                model_only_path = os.path.join(output_dir, f"model_only_epoch_{epoch+1}.pt")
+                model_only_path = os.path.join(args.output_dir, f"model_only_epoch_{epoch+1}.pt")
                 logger.info(f"Attempting to save model-only checkpoint to {model_only_path}")
                 torch.save(model.state_dict(), model_only_path)
                 logger.info(f"Model-only checkpoint saved successfully")
@@ -637,7 +441,7 @@ def train_model_verbose():
                 
                 # Final fallback: try to save at a different location
                 try:
-                    alt_path = os.path.join(os.path.dirname(output_dir), f"emergency_save_epoch_{epoch+1}.pt")
+                    alt_path = os.path.join(os.path.dirname(args.output_dir), f"emergency_save_epoch_{epoch+1}.pt")
                     logger.info(f"Final attempt: Saving model to alternative location: {alt_path}")
                     torch.save(model.state_dict(), alt_path)
                     logger.info(f"Emergency save successful at {alt_path}")
@@ -660,39 +464,25 @@ def train_model_verbose():
     
     avg_val_loss = val_loss / val_steps
     val_ppl = compute_perplexity(avg_val_loss)
+    logger.info(f"Final validation loss: {avg_val_loss:.4f}, perplexity: {val_ppl:.2f}")
     
-    logger.info(f"Final Validation Loss: {avg_val_loss:.4f}, Perplexity: {val_ppl:.2f}")
+    # Save final model
+    final_model_path = os.path.join(args.output_dir, "final_model.pt")
+    torch.save(model.state_dict(), final_model_path)
+    logger.info(f"Final model saved to {final_model_path}")
     
-    # Generate final sample
-    logger.info("Generating final sample text...")
-    model.eval()
-    
-    prompt = "In a world where quantum computing has become mainstream,"
-    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
-    
-    with torch.no_grad():
-        output_ids = model.generate(
-            input_ids=input_ids,
-            max_length=100,
-            temperature=0.8,
-            do_sample=True,
-            top_k=50,
-            top_p=0.95
-        )
-    
-    sample_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-    logger.info(f"Final sample:\n{sample_text}")
-    
-    # Save the final model
-    final_model_dir = os.path.join(output_dir, "final_model")
-    os.makedirs(final_model_dir, exist_ok=True)
-    
-    model.save_pretrained(final_model_dir)
-    tokenizer.save_pretrained(final_model_dir)
-    
-    logger.info(f"Training completed. Final model saved to {final_model_dir}")
-    return model, tokenizer
+    # Print completion message
+    logger.info("Verbose training completed!")
 
 
 if __name__ == "__main__":
-    train_model_verbose()
+    try:
+        train_model_verbose()
+    except KeyboardInterrupt:
+        print("\nTraining interrupted by user")
+        sys.exit(0)
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)

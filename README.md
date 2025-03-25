@@ -1,200 +1,135 @@
-# Semantic Resonance Language Model
+# Quantum Resonance Language Model (QLLM)
 
-This repository contains a PyTorch implementation of the Semantic Resonance Language Model, a next-generation language model architecture that integrates semantic resonance principles with transformer-based language modeling.
-
-## Overview
-
-The Semantic Resonance Language Model introduces several innovative components:
-
-1. **Prime Hilbert Encoder**: Maps tokens and positions into prime-based subspaces for efficient representation
-2. **Resonance Blocks**: Implements iterative attention with entropy-based halting
-3. **Self-Evolving Memory (HCW)**: Enables continuous adaptation without catastrophic forgetting
-4. **Model Compression**: Uses prime resonance masking for parameter-efficient models
-
-The model aims to achieve:
-- **High Learning Speed**: Requiring fewer parameters/data to reach low perplexity
-- **Continuous Self-Evolution**: Adapting to new information on the fly
-- **Compression**: Reducing model size while maintaining performance
-
-## Installation
-
-### Requirements
-
-- Python 3.8+
-- PyTorch 2.0+
-- Transformers
-- Datasets
-- TensorBoard
-
-### Setup
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/yourusername/semantic-resonance-lm.git
-   cd semantic-resonance-lm
-   ```
-
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+A language model implementation that uses quantum resonance principles for improved attention mechanisms.
 
 ## Project Structure
 
+The codebase has been refactored into a modular structure for better organization and maintainability:
+
 ```
-semantic-resonance-lm/
-│
-├── main.py                 # Main entry point for all operations
+qllm/
+├── main.py                 # Main entrypoint for all operations
+├── train_verbose.py        # Specialized training script with detailed logging
 ├── src/
-│   ├── config.py           # Configuration classes
-│   ├── train.py            # Training script
-│   ├── model/              # Model components
-│   │   ├── prime_hilbert_encoder.py
-│   │   ├── resonance_attention.py
-│   │   ├── resonance_block.py
-│   │   ├── homomorphic_wrapper.py
-│   │   ├── pre_manifest_layer.py
-│   │   └── semantic_resonance_model.py
-│   ├── data/               # Data processing
-│   │   └── wikitext_dataset.py
-│   ├── training/           # Training infrastructure
-│   │   └── trainer.py
-│   ├── evaluation/         # Evaluation metrics
-│   │   └── metrics.py
-│   └── utils/              # Utility functions
-│       └── compression.py
-└── requirements.txt        # Project dependencies
-```
-
-## Usage
-
-The implementation provides a unified interface through `main.py` with different modes of operation:
-
-### Training
-
-Train a new model on the WikiText-103 dataset:
-
-```bash
-python main.py --mode train --output_dir runs/my_model --batch_size 32 --max_epochs 10
-```
-
-Advanced configuration:
-
-```bash
-python main.py --mode train --hidden_dim 768 --num_layers 6 --num_heads 12 \
-    --primes 7 11 13 17 19 --learning_rate 5e-5 --batch_size 32 \
-    --enable_hcw --output_dir runs/custom_model
-```
-
-Resume training from a checkpoint:
-
-```bash
-python main.py --mode train --resume --model_path runs/my_model/checkpoints/best_model.pt \
-    --output_dir runs/my_model_continued
-```
-
-### Evaluation
-
-Evaluate a trained model on the validation or test set:
-
-```bash
-python main.py --mode eval --model_path runs/my_model --eval_split validation
-```
-
-### Model Compression
-
-Apply prime resonance compression to a trained model:
-
-```bash
-python main.py --mode compress --model_path runs/my_model \
-    --compression_threshold 0.8 --compression_method both \
-    --output_dir runs/compressed_model
-```
-
-### Text Generation
-
-Generate text using a trained model:
-
-```bash
-python main.py --mode generate --model_path runs/my_model \
-    --prompt "Once upon a time" --max_length 100 \
-    --temperature 0.7 --top_k 50 --top_p 0.95
+│   ├── cli/                # Command-line interface utilities
+│   │   ├── arg_parsing.py  # Argument parsing for all commands
+│   │   └── commands.py     # Command implementations
+│   ├── data/               # Data handling
+│   │   └── dataloaders.py  # Dataset loading and processing
+│   ├── model/              # Model architecture
+│   │   ├── semantic_resonance_model.py
+│   │   └── resonance_attention.py
+│   ├── training/           # Training utilities
+│   │   ├── checkpoint.py   # Robust checkpoint handling
+│   │   ├── trainer.py      # Core training loop
+│   │   └── evaluator.py    # Model evaluation
+│   └── utils/              # Shared utilities
+│       ├── config.py       # Configuration management
+│       ├── device.py       # Device utilities
+│       ├── logging.py      # Structured logging
+│       └── compression.py  # Model compression utilities
+└── runs/                   # Training runs output directory
 ```
 
 ## Key Components
 
-### Prime Hilbert Encoder
+### Command Line Interface
 
-The Prime Hilbert Encoder maps tokens and positions into prime-based subspaces. Each token and position is represented across multiple subspaces with dimensions defined by distinct primes.
+The CLI system is designed to handle four primary operations:
 
-```python
-# Example:
-encoder = PrimeHilbertEncoder(
-    vocab_size=30000,
-    primes=[7, 11, 13, 17, 19],
-    base_dim=768
-)
+- **Training**: `python main.py --mode train`
+- **Evaluation**: `python main.py --mode eval`
+- **Text Generation**: `python main.py --mode generate`
+- **Model Compression**: `python main.py --mode compress`
+
+### Model Architecture
+
+The model uses a transformer architecture with specialized quantum resonance attention mechanisms:
+
+- **Semantic Resonance Model**: Main model implementation
+- **Resonance Attention**: Custom attention mechanism that iteratively refines attention distributions
+
+### Trainer
+
+The trainer (`src/training/trainer.py`) provides a unified interface for model training with:
+
+- Checkpoint management
+- Early stopping
+- Learning rate scheduling
+- Mixed precision training
+- Progress tracking
+
+### Configuration System
+
+Configurations use typed dataclasses for type safety and validation:
+
+- **ModelConfig**: Architecture parameters
+- **TrainingConfig**: Training hyperparameters
+- **DataConfig**: Dataset and tokenization settings 
+- **GenerationConfig**: Text generation parameters
+
+## Usage
+
+### Basic Training
+
+```bash
+python main.py --mode train --output_dir runs/my_model --max_epochs 10
 ```
 
-### Resonance Attention
+### Detailed Training with Verbose Logging
 
-Implements multi-head attention with iterative refinement, stopping when the entropy of the attention distribution falls below a threshold.
+For debugging and visualizing the resonance attention process:
 
-```python
-# Example:
-attention = ResonanceAttention(
-    hidden_dim=768,
-    num_heads=12,
-    max_iterations=10,
-    epsilon=0.1
-)
+```bash
+python train_verbose.py --output_dir runs/debug_run --log_entropy_every 50
 ```
 
-### Homomorphic Computational Wrapper (HCW)
+### Evaluation
 
-Enables the model to update its knowledge continuously by generating contextual weight deltas based on new information.
-
-```python
-# Example:
-hcw = HomomorphicComputationalWrapper(
-    hidden_dim=768,
-    memory_size=1000,
-    key_dim=128
-)
+```bash
+python main.py --mode eval --checkpoint_path runs/my_model/checkpoints/best_model.pt
 ```
 
-### Prime Resonance Compression
+### Text Generation
 
-Reduces model size by applying structured sparsity guided by prime-based frequency analysis.
-
-```python
-# Apply compression:
-compressed_model, ratio = compress_model(
-    model,
-    {"method": "both", "primes": [7, 11, 13, 17, 19], "threshold": 0.8}
-)
+```bash
+python main.py --mode generate --checkpoint_path runs/my_model/checkpoints/best_model.pt --prompt "The quantum theory of"
 ```
 
-## Performance
+### Model Compression
 
-The implementation aims to achieve:
-
-- Comparable perplexity to larger models with significantly fewer parameters
-- Faster convergence during training
-- Continuous adaptation to new data with minimal forgetting
-
-## Citations
-
-If you use this implementation in your research, please cite:
-
-```
-@article{semantic_resonance_lm,
-  title={A Next-Generation Knowledge Model Leveraging Semantic Resonance for Efficient Language Understanding},
-  author={Schepis, Sebastian},
-  year={2025}
-}
+```bash
+python main.py --mode compress --checkpoint_path runs/my_model/checkpoints/best_model.pt --compression_threshold 0.7
 ```
 
-## License
+## Configuration
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+You can provide configurations in three ways:
+
+1. **Command line arguments**: Override specific parameters.
+2. **Configuration files**: Load complete configurations from JSON files.
+3. **Environment variables**: Set configuration through environment.
+
+Example:
+
+```bash
+python main.py --mode train --config_dir configs/ --learning_rate 1e-4
+```
+
+## Checkpoint Management
+
+The project includes robust checkpoint handling that can:
+
+- Automatically find and load the latest checkpoint
+- Resume training from interruptions
+- Handle disk space errors with fallback mechanisms
+- Load partial checkpoints (model-only)
+
+## Extending the Codebase
+
+To add new features:
+
+1. **New model architectures**: Add to `src/model/`
+2. **Custom datasets**: Extend `src/data/dataloaders.py`
+3. **Training variations**: Create specialized trainers in `src/training/`
+4. **CLI commands**: Add to `src/cli/commands.py` and update argument parsing
