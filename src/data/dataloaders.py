@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader, Dataset, random_split
 from datasets import load_dataset, DatasetDict, Dataset as HFDataset
 from transformers import PreTrainedTokenizer
 from typing import Dict, Tuple, Optional, List, Union, Callable, Any
+from .tensor_collate import tensor_collate_fn
 
 # Get logger
 logger = logging.getLogger("quantum_resonance")
@@ -286,12 +287,13 @@ def get_wikitext_dataloaders(
         subset_size=subset_size
     )
     
-    # Create dataloaders
+    # Create dataloaders with tensor collation to ensure proper tensor conversion
     return create_dataloaders(
         datasets=datasets,
         batch_size=batch_size,
         eval_batch_size=eval_batch_size,
-        num_workers=num_workers
+        num_workers=num_workers,
+        collate_fn=tensor_collate_fn
     )
 
 

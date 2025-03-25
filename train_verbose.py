@@ -24,6 +24,8 @@ from src.utils.config import ModelConfig, TrainingConfig, DataConfig
 from src.utils.config import get_default_configs, save_configs
 from src.model.semantic_resonance_model import SemanticResonanceModel 
 from src.data.dataloaders import get_wikitext_dataloaders, compute_perplexity
+from src.data.tensor_collate import debug_batch_structure
+from src.data.batch_utils import batch_to_device, debug_batch_contents
 from src.training.checkpoint import load_checkpoint, save_checkpoint, find_latest_checkpoint
 
 
@@ -341,8 +343,13 @@ def train_model_verbose():
     logger.info("Starting training...")
     model.train()
     
-    # Use AMP for mixed precision training
-    scaler = torch.cuda.amp.GradScaler()
+    # Use AMP for mixed precision training - with updated API
+    if torch.cuda.is_available():
+        logger.info("Using CUDA mixed-precision training")
+        scaler = torch.amp.GradScaler('cuda')
+    else:
+        logger.info("Mixed-precision not available - using CPU")
+        scaler = torch.amp.GradScaler('cpu')
     
     # Train for specified number of epochs
     for epoch in range(start_epoch, args.max_epochs):
@@ -358,11 +365,45 @@ def train_model_verbose():
         )
         
         for batch_idx, batch in enumerate(train_iterator):
-            # Move batch to device
-            batch = {k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask", "labels"]}
+            # Debug first batch details for understanding structure
+            if batch_idx == 0:
+                logger.info(f"First batch structure debugging (device={device}):")
+                debug_batch_structure(batch, name="Initial batch")
+                debug_batch_contents(batch)
+            
+            try:
+                # Move batch to device with robust error handling
+                batch = batch_to_device(batch, device)
+                
+                # Log the processed batch for the first iteration
+                if batch_idx == 0:
+                    logger.info("After batch_to_device processing:")
+                    debug_batch_structure(batch, name="Processed batch")
+                    if 'input_ids' in batch:
+                        logger.info(f"Input shape: {batch['input_ids'].shape}")
+                    else:
+                        logger.warning("No input_ids found in batch!")
+            except Exception as e:
+                logger.error(f"Error processing batch: {e}")
+                if batch_idx == 0:
+                    # Much more detailed error reporting for the first batch
+                    logger.error("Batch content details:")
+                    for k, v in batch.items():
+                        try:
+                            logger.error(f"  {k}: {type(v).__name__}, {str(v)[:100]}")
+                        except:
+                            logger.error(f"  {k}: {type(v).__name__}, <cannot display>")
+                raise
+            
+            # Validate batch has required keys before forward pass
+            for key in ["input_ids", "attention_mask", "labels"]:
+                if key not in batch:
+                    raise ValueError(f"Required key '{key}' missing from batch")
+                if not isinstance(batch[key], torch.Tensor):
+                    raise ValueError(f"Batch[{key}] is not a tensor but {type(batch[key])}")
             
             # Forward pass with AMP
-            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+            with torch.amp.autocast(device_type=device.type if hasattr(device, 'type') else 'cpu', enabled=True):
                 outputs = model(**batch, return_dict=True)
                 loss = outputs["loss"]
             
