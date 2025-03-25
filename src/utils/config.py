@@ -21,10 +21,16 @@ class ModelConfig:
     # Core architecture
     vocab_size: int = 50257
     hidden_dim: int = 768
+    embedding_dim: int = 768  # Dimension for embeddings and attention
     num_layers: int = 4
     num_heads: int = 12
     base_dim: int = 64    # Base dimension for Prime Hilbert Encoder
     max_seq_length: int = 1024  # Maximum sequence length
+    
+    # HCW (Homomorphic Computational Wrapper) settings
+    enable_hcw: bool = False
+    memory_size: int = 64
+    memory_key_dim: int = 128
     
     # FFN properties
     ff_dim: int = 3072
@@ -33,6 +39,7 @@ class ModelConfig:
     # Resonance properties
     max_iterations: int = 10
     resonance_epsilon: float = 0.1
+    entropy_threshold: float = 0.1  # Alias for resonance_epsilon for backward compatibility
     resonance_momentum: float = 0.2
     entropy_penalty: float = 0.05
     

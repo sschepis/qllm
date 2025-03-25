@@ -42,6 +42,8 @@ def parse_verbose_args():
     # Model configuration
     parser.add_argument("--hidden_dim", type=int, default=256,
                        help="Size of hidden dimensions")
+    parser.add_argument("--embedding_dim", type=int, default=256,
+                       help="Size of embedding dimensions")
     parser.add_argument("--num_layers", type=int, default=4,
                        help="Number of transformer layers")
     parser.add_argument("--num_heads", type=int, default=4,
@@ -50,6 +52,14 @@ def parse_verbose_args():
                        help="Base dimension for Prime Hilbert Encoder")
     parser.add_argument("--max_seq_length", type=int, default=1024,
                        help="Maximum sequence length")
+    
+    # HCW configuration
+    parser.add_argument("--enable_hcw", action="store_true",
+                       help="Enable Homomorphic Computational Wrapper")
+    parser.add_argument("--memory_size", type=int, default=64,
+                       help="Memory size for HCW")
+    parser.add_argument("--memory_key_dim", type=int, default=128,
+                       help="Memory key dimension for HCW")
     
     # Resonance settings
     parser.add_argument("--max_iterations", type=int, default=10,
@@ -161,14 +171,21 @@ def train_model_verbose():
     
     # Update model config from args
     model_config.hidden_dim = args.hidden_dim
+    model_config.embedding_dim = args.embedding_dim  # Add this for resonance blocks
     model_config.num_layers = args.num_layers
     model_config.num_heads = args.num_heads
     model_config.base_dim = args.base_dim
     model_config.max_seq_length = args.max_seq_length
     model_config.max_iterations = args.max_iterations
     model_config.resonance_epsilon = args.resonance_epsilon
+    model_config.entropy_threshold = args.resonance_epsilon  # Map epsilon to entropy_threshold
     model_config.resonance_momentum = args.resonance_momentum
     model_config.phase_factor = args.phase_factor
+    
+    # HCW settings
+    model_config.enable_hcw = args.enable_hcw
+    model_config.memory_size = args.memory_size
+    model_config.memory_key_dim = args.memory_key_dim
     
     # Update training config from args
     training_config.max_epochs = args.max_epochs
