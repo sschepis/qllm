@@ -57,7 +57,6 @@ ENV/
 # Project specific
 runs/
 examples/output/
-data/
 datasets/
 logs/
 .env
