@@ -479,11 +479,6 @@ class ResonanceAttention(nn.Module):
             newly_converged = converged.sum().item()
             if newly_converged > 0:
                 metadata["converged_samples"] += newly_converged
-                # Log which convergence mechanism triggered
-                entropy_triggers = converged_by_entropy.sum().item()
-                similarity_triggers = (converged_by_similarity & ~converged_by_entropy).sum().item()
-                print(f"Iteration {t+1}: {entropy_triggers} samples converged by entropy, " +
-                      f"{similarity_triggers} by similarity")
             
             # Break if all samples have converged
             if converged.all():
