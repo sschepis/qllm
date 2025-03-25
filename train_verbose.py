@@ -46,6 +46,10 @@ def parse_verbose_args():
                        help="Number of transformer layers")
     parser.add_argument("--num_heads", type=int, default=4,
                        help="Number of attention heads")
+    parser.add_argument("--base_dim", type=int, default=64,
+                       help="Base dimension for Prime Hilbert Encoder")
+    parser.add_argument("--max_seq_length", type=int, default=1024,
+                       help="Maximum sequence length")
     
     # Resonance settings
     parser.add_argument("--max_iterations", type=int, default=10,
@@ -159,6 +163,8 @@ def train_model_verbose():
     model_config.hidden_dim = args.hidden_dim
     model_config.num_layers = args.num_layers
     model_config.num_heads = args.num_heads
+    model_config.base_dim = args.base_dim
+    model_config.max_seq_length = args.max_seq_length
     model_config.max_iterations = args.max_iterations
     model_config.resonance_epsilon = args.resonance_epsilon
     model_config.resonance_momentum = args.resonance_momentum

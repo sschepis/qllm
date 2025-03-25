@@ -23,6 +23,8 @@ class ModelConfig:
     hidden_dim: int = 768
     num_layers: int = 4
     num_heads: int = 12
+    base_dim: int = 64    # Base dimension for Prime Hilbert Encoder
+    max_seq_length: int = 1024  # Maximum sequence length
     
     # FFN properties
     ff_dim: int = 3072
