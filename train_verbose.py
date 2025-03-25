@@ -206,7 +206,16 @@ def train_model_verbose():
         # Initialize model
         logger.info("Loading existing model from checkpoint...")
         model = SemanticResonanceModel(model_config)
-        model.load_state_dict(checkpoint["model_state_dict"])
+        
+        # Use strict=False to allow loading even with architecture changes
+        missing_keys, unexpected_keys = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        
+        # Log missing and unexpected keys for debugging
+        if missing_keys:
+            logger.warning(f"Missing keys in checkpoint: {missing_keys}")
+        if unexpected_keys:
+            logger.warning(f"Unexpected keys in checkpoint: {unexpected_keys}")
+            
         model.to(device)
         
         # Get the epoch number from the checkpoint filename
