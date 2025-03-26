@@ -45,6 +45,12 @@ class SemanticResonanceModel(nn.Module):
             max_seq_len=config.max_seq_length
         )
         
+        # Projection layer to align encoder output dimension with model dimension
+        # The encoder outputs dim = sum(primes), we need to project to embedding_dim
+        encoder_output_dim = sum(config.primes)
+        self.encoder_projection = nn.Linear(encoder_output_dim, config.embedding_dim)
+        self.encoder_norm = nn.LayerNorm(config.embedding_dim)
+        
         # Stack of Resonance Blocks
         self.layers = nn.ModuleList([
             ResonanceBlock(
@@ -157,7 +163,11 @@ class SemanticResonanceModel(nn.Module):
         attn_mask = self._prepare_attention_mask(input_ids, attention_mask)
         
         # Encode inputs using Prime Hilbert Encoder
-        hidden_states = self.encoder(input_ids, positions)  # [batch_size, seq_len, embedding_dim]
+        encoder_output = self.encoder(input_ids, positions)  # [batch_size, seq_len, sum(primes)]
+        
+        # Project from encoder dimension to model dimension
+        hidden_states = self.encoder_projection(encoder_output)  # [batch_size, seq_len, embedding_dim]
+        hidden_states = self.encoder_norm(hidden_states)
         
         # Initialize dictionary to collect block metadata
         all_block_metadata = []

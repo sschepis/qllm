@@ -11,6 +11,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from .fixed_autocast import device_aware_autocast
 
 
 class ResonanceAttention(nn.Module):
@@ -191,7 +192,8 @@ class ResonanceAttention(nn.Module):
                 probs = chunk + 1e-10
                 
                 # Compute partial entropy sum: -∑ p_i * log(p_i) for this chunk
-                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                # Use our device-aware autocast helper for mixed precision
+                with device_aware_autocast(device=probs.device, enabled=True):
                     # Use lower precision for log computation to save memory
                     chunk_entropy = -torch.sum(probs * torch.log(probs), dim=-1)  # [batch_size, num_heads, chunk_size]
                 

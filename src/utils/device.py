@@ -5,17 +5,26 @@ Provides consistent device setup and management across training and inference.
 
 import os
 import torch
+import logging
 from typing import Optional, Union, Tuple
+
+# Get logger
+logger = logging.getLogger("quantum_resonance")
 
 
 def get_default_device() -> torch.device:
     """
-    Get the default device (CUDA if available, otherwise CPU).
+    Get the default device (CUDA if available, MPS if available on Apple Silicon, otherwise CPU).
     
     Returns:
         torch.device: The default device
     """
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    elif hasattr(torch, 'backends') and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        return torch.device("mps")
+    else:
+        return torch.device("cpu")
 
 
 def parse_device_str(device_str: Optional[str] = None) -> torch.device:
@@ -67,13 +76,19 @@ def get_device(
     else:
         device = parse_device_str(device_str)
     
-    # Ensure CUDA is available if requested
+    # Ensure requested device is available
     if device.type.startswith("cuda") and not torch.cuda.is_available():
         if fallback_to_cpu:
-            print("Warning: CUDA requested but not available. Using CPU instead.")
-            return torch.device("cpu")
+            logger.warning("CUDA requested but not available. Using fallback device.")
+            return get_default_device()
         else:
             raise RuntimeError("CUDA requested but not available, and fallback disabled.")
+    elif device.type == "mps" and (not hasattr(torch.backends, 'mps') or not torch.backends.mps.is_available()):
+        if fallback_to_cpu:
+            logger.warning("MPS (Apple Silicon) requested but not available. Using CPU instead.")
+            return torch.device("cpu")
+        else:
+            raise RuntimeError("MPS requested but not available, and fallback disabled.")
     
     return device
 
@@ -99,6 +114,12 @@ def get_device_info(device: Optional[torch.device] = None) -> dict:
             "index": device.index if hasattr(device, "index") else 0,
             "total_memory_gb": torch.cuda.get_device_properties(device).total_memory / (1024**3),
             "device_count": torch.cuda.device_count(),
+        })
+    elif device.type == "mps":
+        info.update({
+            "name": "Apple Silicon GPU",
+            "is_available": torch.backends.mps.is_available(),
+            "is_built": torch.backends.mps.is_built(),
         })
     
     return info
