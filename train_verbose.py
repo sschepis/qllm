@@ -83,7 +83,7 @@ def parse_verbose_args():
     # Training settings
     parser.add_argument("--max_epochs", type=int, default=100,
                        help="Maximum number of training epochs")
-    parser.add_argument("--batch_size", type=int, default=4,
+    parser.add_argument("--batch_size", type=int, default=16,
                        help="Training batch size (reduced for full dataset)")
     parser.add_argument("--learning_rate", type=float, default=5e-4,
                        help="Learning rate")
