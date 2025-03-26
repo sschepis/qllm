@@ -1,0 +1,94 @@
+[
+  {
+    "conversations": [
+      {
+        "role": "system",
+        "content": "You can use functions to perform actions. Available functions: get_weather, search_knowledge_base, calculate."
+      },
+      {
+        "role": "user",
+        "content": "What's the weather like in San Francisco today?"
+      },
+      {
+        "role": "assistant",
+        "content": "<|function_call|>\n{\n  \"name\": \"get_weather\",\n  \"arguments\": {\n    \"location\": \"San Francisco, CA\",\n    \"unit\": \"celsius\"\n  }\n}\n<|end|>"
+      },
+      {
+        "role": "function",
+        "content": "<|function_result|>\n{\n  \"temperature\": 18,\n  \"unit\": \"celsius\",\n  \"description\": \"Partly cloudy\",\n  \"forecast\": [\"Clear\", \"Partly cloudy\", \"Cloudy\"]\n}\n<|end|>",
+        "name": "get_weather"
+      },
+      {
+        "role": "assistant",
+        "content": "The weather in San Francisco today is partly cloudy with a temperature of 18°C. The forecast shows it will be clear, then partly cloudy, and later cloudy."
+      }
+    ]
+  },
+  {
+    "conversations": [
+      {
+        "role": "user",
+        "content": "Can you help me calculate the compound interest on $5000 at 4.5% for 5 years?"
+      },
+      {
+        "role": "assistant",
+        "content": "<|function_call|>\n{\n  \"name\": \"calculate\",\n  \"arguments\": {\n    \"operation\": \"power\",\n    \"a\": 1.045,\n    \"b\": 5\n  }\n}\n<|end|>"
+      },
+      {
+        "role": "function",
+        "content": "<|function_result|>\n{\n  \"result\": 1.246182262,\n  \"status\": \"success\"\n}\n<|end|>",
+        "name": "calculate"
+      },
+      {
+        "role": "assistant",
+        "content": "<|json_response|>\n{\n  \"response\": \"For an investment of $5000 at 4.5% annual interest over 5 years, the compound interest factor is 1.246182262. This means your investment will grow to $6,230.91, representing a gain of $1,230.91 in interest.\"\n}\n<|end|>"
+      }
+    ]
+  },
+  {
+    "conversations": [
+      {
+        "role": "user",
+        "content": "Find me information about quantum computing basics."
+      },
+      {
+        "role": "assistant",
+        "content": "<|function_call|>\n{\n  \"name\": \"search_knowledge_base\",\n  \"arguments\": {\n    \"query\": \"quantum computing basics\",\n    \"max_results\": 3\n  }\n}\n<|end|>"
+      },
+      {
+        "role": "function",
+        "content": "<|function_result|>\n{\n  \"results\": [\n    {\n      \"title\": \"Introduction to Quantum Computing\",\n      \"snippet\": \"Quantum computing uses quantum bits or qubits, which can exist in multiple states simultaneously thanks to superposition...\",\n      \"url\": \"https://example.com/quantum/intro\"\n    },\n    {\n      \"title\": \"Quantum Computing Principles\",\n      \"snippet\": \"The key principles of quantum computing include superposition, entanglement, and quantum interference...\",\n      \"url\": \"https://example.com/quantum/principles\"\n    },\n    {\n      \"title\": \"Quantum vs Classical Computing\",\n      \"snippet\": \"Unlike classical bits that are either 0 or 1, quantum bits can exist in a superposition of states...\",\n      \"url\": \"https://example.com/quantum/comparison\"\n    }\n  ],\n  \"total_results\": 428\n}\n<|end|>",
+        "name": "search_knowledge_base"
+      },
+      {
+        "role": "assistant",
+        "content": "I found some information about quantum computing basics for you:\n\n1. **Introduction to Quantum Computing**: Quantum computing uses quantum bits or qubits, which can exist in multiple states simultaneously thanks to superposition.\n\n2. **Quantum Computing Principles**: The key principles include superposition, entanglement, and quantum interference.\n\n3. **Quantum vs Classical Computing**: Unlike classical bits that are either 0 or 1, quantum bits can exist in a superposition of states.\n\nThere are 428 total results available on this topic. Would you like me to find more specific information about any of these aspects?"
+      }
+    ]
+  },
+  {
+    "conversations": [
+      {
+        "role": "system",
+        "content": "You can create calendar events and search knowledge bases."
+      },
+      {
+        "role": "user",
+        "content": "Schedule a team meeting for next Monday at 10am"
+      },
+      {
+        "role": "assistant",
+        "content": "<|function_call|>\n{\n  \"name\": \"create_calendar_event\",\n  \"arguments\": {\n    \"title\": \"Team Meeting\",\n    \"start_time\": \"2025-04-01T10:00:00\",\n    \"end_time\": \"2025-04-01T11:00:00\",\n    \"description\": \"Regular team sync-up\",\n    \"attendees\": [\"team@example.com\"]\n  }\n}\n<|end|>"
+      },
+      {
+        "role": "function",
+        "content": "<|function_result|>\n{\n  \"event_id\": \"ev_12345\",\n  \"status\": \"confirmed\",\n  \"link\": \"https://calendar.example.com/event/12345\"\n}\n<|end|>",
+        "name": "create_calendar_event"
+      },
+      {
+        "role": "assistant",
+        "content": "<|json_response|>\n{\n  \"response\": \"I've scheduled a team meeting for Monday, April 1, 2025, from 10:00 AM to 11:00 AM. The meeting has been added to your calendar and an invitation has been sent to the team. You can view or edit the event at https://calendar.example.com/event/12345.\"\n}\n<|end|>"
+      }
+    ]
+  }
+]

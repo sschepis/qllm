@@ -1,0 +1,152 @@
+{
+  "model_config": {
+    "embedding_dim": 512,
+    "num_heads": 8,
+    "num_layers": 6,
+    "vocab_size": 10000,
+    "max_seq_length": 1024,
+    "extension_config": {
+      "enable_multimodal": true,
+      "enable_memory": true,
+      "enable_quantum": true,
+      "multimodal_config": {
+        "vision_model": "resnet50",
+        "use_spatial_features": true
+      },
+      "memory_config": {
+        "memory_size": 1000,
+        "entity_dim": 256,
+        "relation_dim": 128
+      },
+      "quantum_config": {
+        "pattern_type": "harmonic",
+        "mask_type": "binary",
+        "base_sparsity": 0.8
+      }
+    }
+  },
+  "evaluation_config": {
+    "extensions_to_evaluate": ["multimodal", "memory", "quantum", "baseline", "integrated"],
+    "metrics": [
+      "perplexity",
+      "parameter_efficiency",
+      "memory_usage",
+      "inference_speed",
+      "generation_diversity"
+    ],
+    "run_ablation_studies": true,
+    "datasets": {
+      "text": [
+        "The neural network processes information through multiple layers of transformation.",
+        "Quantum computing leverages superposition and entanglement for computation.",
+        "Large language models demonstrate emergent abilities as their scale increases.",
+        "The knowledge graph connects entities and relations to represent structured data.",
+        "Multimodal models integrate information from different sensory modalities."
+      ],
+      "inference_inputs": [
+        "The model architecture",
+        "Quantum resonance patterns",
+        "Knowledge representation in graphs",
+        "Vision-language integration"
+      ],
+      "generation_prompts": [
+        "The future of artificial intelligence will",
+        "Quantum computing enables",
+        "Neural networks can process",
+        "The integration of multiple modalities allows"
+      ],
+      "images": [
+        {
+          "id": "img_1",
+          "image": "examples/test_images/neural_network.jpg",
+          "text": "Explain this neural network architecture:"
+        },
+        {
+          "id": "img_2",
+          "image": "examples/test_images/quantum_computer.jpg",
+          "text": "Describe this quantum computing system:"
+        }
+      ],
+      "memory_data": {
+        "entities": [
+          {
+            "name": "Neural Network",
+            "type": 1,
+            "metadata": {"field": "Computer Science", "year": 1943}
+          },
+          {
+            "name": "Transformer",
+            "type": 1,
+            "metadata": {"field": "NLP", "year": 2017}
+          },
+          {
+            "name": "Quantum Computing",
+            "type": 2,
+            "metadata": {"field": "Physics", "year": 1980}
+          },
+          {
+            "name": "GPT",
+            "type": 1,
+            "metadata": {"field": "AI", "year": 2018}
+          },
+          {
+            "name": "BERT",
+            "type": 1,
+            "metadata": {"field": "NLP", "year": 2018}
+          }
+        ],
+        "relations": [
+          {
+            "source": "Transformer",
+            "target": "GPT",
+            "relation_type": 1,
+            "metadata": {"strength": 0.9}
+          },
+          {
+            "source": "Neural Network",
+            "target": "Transformer",
+            "relation_type": 2,
+            "metadata": {"strength": 0.7}
+          },
+          {
+            "source": "Transformer",
+            "target": "BERT",
+            "relation_type": 3,
+            "metadata": {"strength": 0.8}
+          },
+          {
+            "source": "Neural Network",
+            "target": "Quantum Computing",
+            "relation_type": 4,
+            "metadata": {"strength": 0.5}
+          }
+        ],
+        "queries": [
+          {
+            "type": "entity",
+            "params": {"name": "Transformer"}
+          },
+          {
+            "type": "relation",
+            "params": {"source": "Neural Network"}
+          },
+          {
+            "type": "relation",
+            "params": {"relation_type": 1}
+          }
+        ],
+        "generation_prompts": [
+          "Neural networks are",
+          "Transformers have revolutionized",
+          "The relationship between quantum computing and neural networks"
+        ]
+      }
+    }
+  },
+  "output_dir": "evaluation_results",
+  "visualize_metrics": [
+    "perplexity",
+    "parameter_efficiency",
+    "inference_speed"
+  ]
+}

@@ -49,7 +49,7 @@ def quick_start_demo():
         batch_size=4,      # Small batch size
         learning_rate=5e-4,  # Slightly higher for quick convergence
         weight_decay=0.01,
-        max_epochs=1,      # Just one epoch for demo
+        max_epochs=10,      # Multiple epochs for better training
         warmup_steps=10,
         accumulation_steps=1,
         save_steps=50,
@@ -112,45 +112,53 @@ def quick_start_demo():
         weight_decay=training_config.weight_decay
     )
     
-    # Train for a few steps
-    print("Training for a few steps...")
+    # Train for multiple epochs
+    print(f"Training for {training_config.max_epochs} epochs...")
     model.train()
     
-    for i, batch in enumerate(dataloader):
-        # Move batch to device
-        batch = {k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask", "labels"]}
+    for epoch in range(training_config.max_epochs):
+        epoch_loss = 0.0
+        print(f"\nEpoch {epoch+1}/{training_config.max_epochs}")
+        print("-" * 30)
         
-        # Forward pass
-        outputs = model(**batch, return_dict=True)
-        loss = outputs["loss"]
+        for i, batch in enumerate(dataloader):
+            # Move batch to device
+            batch = {k: v.to(device) for k, v in batch.items() if k in ["input_ids", "attention_mask", "labels"]}
+            
+            # Forward pass
+            outputs = model(**batch, return_dict=True)
+            loss = outputs["loss"]
+            
+            # Track loss
+            epoch_loss += loss.item()
+            
+            # Backward pass
+            loss.backward()
+            
+            # Optimizer step
+            optimizer.step()
+            optimizer.zero_grad()
+            
+            # Print progress
+            print(f"Epoch {epoch+1}/{training_config.max_epochs}, Step {i+1}/{len(dataloader)}, Loss: {loss.item():.4f}")
+            
+            # Get metadata from the last layer
+            if "metadata" in outputs:
+                last_layer_data = next((m for m in outputs["metadata"] if m.get("layer") == "final"), None)
+                if last_layer_data and "metadata" in last_layer_data:
+                    entropy = last_layer_data["metadata"].get("entropy")
+                    iterations = last_layer_data["metadata"].get("iterations")
+                    
+                    if isinstance(entropy, torch.Tensor):
+                        print(f"  Average entropy: {entropy.mean().item():.4f}")
+                    
+                    if isinstance(iterations, torch.Tensor):
+                        avg_iters = iterations.float().mean().item()
+                        print(f"  Average iterations: {avg_iters:.2f}")
         
-        # Backward pass
-        loss.backward()
-        
-        # Optimizer step
-        optimizer.step()
-        optimizer.zero_grad()
-        
-        # Print progress
-        print(f"Step {i+1}/{len(dataloader)}, Loss: {loss.item():.4f}")
-        
-        # Get metadata from the last layer
-        if "metadata" in outputs:
-            last_layer_data = next((m for m in outputs["metadata"] if m.get("layer") == "final"), None)
-            if last_layer_data and "metadata" in last_layer_data:
-                entropy = last_layer_data["metadata"].get("entropy")
-                iterations = last_layer_data["metadata"].get("iterations")
-                
-                if isinstance(entropy, torch.Tensor):
-                    print(f"  Average entropy: {entropy.mean().item():.4f}")
-                
-                if isinstance(iterations, torch.Tensor):
-                    avg_iters = iterations.float().mean().item()
-                    print(f"  Average iterations: {avg_iters:.2f}")
-        
-        # Stop after 5 steps for quick demo
-        if i >= 4:
-            break
+        # Print epoch summary
+        avg_epoch_loss = epoch_loss / len(dataloader)
+        print(f"\nEpoch {epoch+1} completed. Average loss: {avg_epoch_loss:.4f}")
     
     # Save tiny model
     os.makedirs("examples/output", exist_ok=True)
