@@ -46,7 +46,7 @@ def quick_start_demo():
     
     # Create training configuration
     training_config = TrainingConfig(
-        batch_size=4,      # Small batch size
+        batch_size=8,      # Small batch size
         learning_rate=5e-4,  # Slightly higher for quick convergence
         weight_decay=0.01,
         max_epochs=10,      # Multiple epochs for better training
@@ -70,7 +70,7 @@ def quick_start_demo():
     
     # Load a small subset of WikiText
     print("Loading data...")
-    dataset = load_dataset("wikitext", "wikitext-103-raw-v1", split="train[:100]")
+    dataset = load_dataset("wikitext", "wikitext-103-raw-v1", split="train[:10000]")
     
     # Prepare dataset
     def tokenize_function(examples):

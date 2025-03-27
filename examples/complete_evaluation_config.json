@@ -1,0 +1,391 @@
+{
+  "model_config": {
+    "embedding_dim": 512,
+    "num_heads": 8,
+    "num_layers": 6,
+    "vocab_size": 10000,
+    "max_seq_length": 1024,
+    "extension_config": {
+      "enable_multimodal": true,
+      "enable_memory": true,
+      "enable_quantum": true,
+      "multimodal_config": {
+        "vision_model": "resnet50",
+        "use_spatial_features": true,
+        "use_multi_resolution": true,
+        "fusion_heads": 8,
+        "fusion_type": "cross_attention"
+      },
+      "memory_config": {
+        "memory_size": 2000,
+        "entity_dim": 256,
+        "relation_dim": 128,
+        "use_graph_structure": true,
+        "enable_counterfactual": true,
+        "enable_inductive_reasoning": true
+      },
+      "quantum_config": {
+        "pattern_type": "harmonic",
+        "mask_type": "binary",
+        "base_sparsity": 0.8,
+        "use_adaptive_resonance": true,
+        "use_dynamic_masks": true,
+        "evolution_rate": 0.1
+      }
+    }
+  },
+  "evaluation_config": {
+    "extensions_to_evaluate": ["multimodal", "memory", "quantum", "baseline", "integrated"],
+    "metrics": [
+      "perplexity",
+      "parameter_efficiency",
+      "memory_usage",
+      "inference_speed",
+      "generation_diversity",
+      "compositional_entailment_score",
+      "systematic_generalization",
+      "cross_domain_transfer",
+      "fact_retrieval_accuracy",
+      "emergent_reasoning",
+      "knowledge_integration",
+      "entropy_collapse_efficiency",
+      "prime_resonance_metrics",
+      "mask_evolution_stability"
+    ],
+    "run_ablation_studies": true,
+    "datasets": {
+      "text": [
+        "The neural network processes information through multiple layers of transformation.",
+        "Quantum computing leverages superposition and entanglement for computation.",
+        "Large language models demonstrate emergent abilities as their scale increases.",
+        "The knowledge graph connects entities and relations to represent structured data.",
+        "Multimodal models integrate information from different sensory modalities.",
+        "Semantic resonance principles establish stable low-entropy representations for complex concepts.",
+        "Prime-based Hilbert encoding reduces parameter counts while maintaining model capacity.",
+        "Homomorphic computational wrappers allow continuous knowledge updates without interference.",
+        "Complex reasoning requires compositional generalization across diverse knowledge domains.",
+        "Entropy-driven collapse mechanisms ensure iterative refinement of uncertain representations."
+      ],
+      "domain_specific": {
+        "quantum_physics": [
+          "Quantum superposition describes a physical system existing in multiple states simultaneously until measured.",
+          "The Heisenberg uncertainty principle establishes fundamental limits on measurement precision.",
+          "Quantum entanglement creates non-local correlations between physically separated particles.",
+          "Wave-particle duality demonstrates that quantum entities exhibit properties of both waves and particles.",
+          "Quantum tunneling allows particles to pass through energy barriers that should be classically impenetrable."
+        ],
+        "neuroscience": [
+          "Neural oscillations synchronize brain activity across distributed networks for coherent cognition.",
+          "Neuroplasticity enables continuous adaptation of neural connections based on experience.",
+          "The hippocampus plays a crucial role in both memory formation and spatial navigation.",
+          "Default mode network activation increases during introspective thought and decreases during focused tasks.",
+          "Predictive coding frameworks suggest the brain constantly generates predictions to minimize surprise."
+        ],
+        "computer_science": [
+          "Self-attention mechanisms enable models to weigh the importance of different input elements.",
+          "Sparse transformers reduce computational complexity by focusing on the most relevant token interactions.",
+          "Knowledge distillation transfers information from larger teacher models to smaller student models.",
+          "Gradient accumulation allows training with effectively larger batch sizes on limited hardware.",
+          "Quantization reduces model size by representing weights with lower numerical precision."
+        ]
+      },
+      "inference_inputs": [
+        "The model architecture",
+        "Quantum resonance patterns",
+        "Knowledge representation in graphs",
+        "Vision-language integration",
+        "Neural-symbolic reasoning",
+        "Counterfactual inference",
+        "Multi-step compositional tasks",
+        "Cross-modal transfer learning"
+      ],
+      "generation_prompts": [
+        "The future of artificial intelligence will",
+        "Quantum computing enables",
+        "Neural networks can process",
+        "The integration of multiple modalities allows",
+        "Knowledge graphs facilitate reasoning by",
+        "The relationship between quantum principles and cognition suggests",
+        "Compositional generalization in language models requires",
+        "Future advancements in semantic resonance will enhance"
+      ],
+      "compositional_test": [
+        {
+          "premise": "A neural network processes visual inputs using convolutional layers.",
+          "hypothesis": "Convolution operations extract spatial features from images.",
+          "relation": "entailment"
+        },
+        {
+          "premise": "Quantum computing uses qubits instead of classical bits.",
+          "hypothesis": "Quantum systems exploit superposition for parallel computation.",
+          "relation": "entailment"
+        },
+        {
+          "premise": "Knowledge graphs store information as entities and relations.",
+          "hypothesis": "Graph databases cannot represent temporal information.",
+          "relation": "contradiction"
+        },
+        {
+          "premise": "Multimodal systems process both text and images simultaneously.",
+          "hypothesis": "Cross-modal attention allows information integration across modalities.",
+          "relation": "entailment"
+        },
+        {
+          "premise": "A homomorphic computational wrapper enables secure computation.",
+          "hypothesis": "All computation must be transparent to be secure.",
+          "relation": "contradiction"
+        }
+      ],
+      "images": [
+        {
+          "id": "img_1",
+          "image": "examples/test_images/neural_network.jpg",
+          "text": "Explain this neural network architecture:"
+        },
+        {
+          "id": "img_2",
+          "image": "examples/test_images/quantum_computer.jpg",
+          "text": "Describe this quantum computing system:"
+        },
+        {
+          "id": "img_3",
+          "image": "examples/test_images/knowledge_graph.jpg",
+          "text": "Analyze this knowledge graph structure:"
+        },
+        {
+          "id": "img_4",
+          "image": "examples/test_images/resonance_pattern.jpg",
+          "text": "Interpret this resonance pattern:"
+        }
+      ],
+      "multimodal_challenging": [
+        {
+          "id": "challenge_1",
+          "image": "examples/test_images/ambiguous_scene.jpg",
+          "text": "What elements in this image are most relevant to quantum computing?",
+          "requires": ["cross-modal reasoning", "background knowledge"]
+        },
+        {
+          "id": "challenge_2",
+          "image": "examples/test_images/complex_diagram.jpg",
+          "text": "Explain how this diagram illustrates semantic resonance principles:",
+          "requires": ["visual abstraction", "domain knowledge integration"]
+        },
+        {
+          "id": "challenge_3",
+          "image": "examples/test_images/multi_concept.jpg",
+          "text": "How do the concepts shown here relate to the prime Hilbert encoding?",
+          "requires": ["compositional understanding", "cross-domain transfer"]
+        }
+      ],
+      "memory_data": {
+        "entities": [
+          {
+            "name": "Neural Network",
+            "type": 1,
+            "metadata": {"field": "Computer Science", "year": 1943}
+          },
+          {
+            "name": "Transformer",
+            "type": 1,
+            "metadata": {"field": "NLP", "year": 2017}
+          },
+          {
+            "name": "Quantum Computing",
+            "type": 2,
+            "metadata": {"field": "Physics", "year": 1980}
+          },
+          {
+            "name": "GPT",
+            "type": 1,
+            "metadata": {"field": "AI", "year": 2018}
+          },
+          {
+            "name": "BERT",
+            "type": 1,
+            "metadata": {"field": "NLP", "year": 2018}
+          },
+          {
+            "name": "Semantic Resonance",
+            "type": 3,
+            "metadata": {"field": "AI", "year": 2022}
+          },
+          {
+            "name": "Prime Hilbert Encoding",
+            "type": 3,
+            "metadata": {"field": "AI", "year": 2022}
+          },
+          {
+            "name": "Homomorphic Wrapper",
+            "type": 3,
+            "metadata": {"field": "AI", "year": 2023}
+          },
+          {
+            "name": "Entropy-Driven Collapse",
+            "type": 3,
+            "metadata": {"field": "AI", "year": 2023}
+          },
+          {
+            "name": "Quantum Resonance",
+            "type": 2,
+            "metadata": {"field": "Physics", "year": 2020}
+          }
+        ],
+        "relations": [
+          {
+            "source": "Transformer",
+            "target": "GPT",
+            "relation_type": 1,
+            "metadata": {"strength": 0.9}
+          },
+          {
+            "source": "Neural Network",
+            "target": "Transformer",
+            "relation_type": 2,
+            "metadata": {"strength": 0.7}
+          },
+          {
+            "source": "Transformer",
+            "target": "BERT",
+            "relation_type": 3,
+            "metadata": {"strength": 0.8}
+          },
+          {
+            "source": "Neural Network",
+            "target": "Quantum Computing",
+            "relation_type": 4,
+            "metadata": {"strength": 0.5}
+          },
+          {
+            "source": "Quantum Computing",
+            "target": "Quantum Resonance",
+            "relation_type": 1,
+            "metadata": {"strength": 0.9}
+          },
+          {
+            "source": "Quantum Resonance",
+            "target": "Semantic Resonance",
+            "relation_type": 5,
+            "metadata": {"strength": 0.8}
+          },
+          {
+            "source": "Semantic Resonance",
+            "target": "Prime Hilbert Encoding",
+            "relation_type": 6,
+            "metadata": {"strength": 0.9}
+          },
+          {
+            "source": "Semantic Resonance",
+            "target": "Entropy-Driven Collapse",
+            "relation_type": 6,
+            "metadata": {"strength": 0.85}
+          },
+          {
+            "source": "Homomorphic Wrapper",
+            "target": "Entropy-Driven Collapse",
+            "relation_type": 7,
+            "metadata": {"strength": 0.7}
+          },
+          {
+            "source": "GPT",
+            "target": "Semantic Resonance",
+            "relation_type": 8,
+            "metadata": {"strength": 0.6}
+          }
+        ],
+        "complex_structures": [
+          {
+            "concept": "Quantum Semantics",
+            "components": ["Quantum Resonance", "Semantic Resonance", "Entropy-Driven Collapse"],
+            "relations": [
+              {"source": "Quantum Resonance", "target": "Semantic Resonance", "type": "inspires"},
+              {"source": "Semantic Resonance", "target": "Entropy-Driven Collapse", "type": "implements"},
+              {"source": "Quantum Resonance", "target": "Entropy-Driven Collapse", "type": "parallels"}
+            ]
+          },
+          {
+            "concept": "Advanced Encoding",
+            "components": ["Prime Hilbert Encoding", "Transformer", "Neural Network"],
+            "relations": [
+              {"source": "Neural Network", "target": "Transformer", "type": "evolves_to"},
+              {"source": "Transformer", "target": "Prime Hilbert Encoding", "type": "enhances"},
+              {"source": "Prime Hilbert Encoding", "target": "Neural Network", "type": "reimagines"}
+            ]
+          }
+        ],
+        "queries": [
+          {
+            "type": "entity",
+            "params": {"name": "Transformer"}
+          },
+          {
+            "type": "relation",
+            "params": {"source": "Neural Network"}
+          },
+          {
+            "type": "relation",
+            "params": {"relation_type": 1}
+          },
+          {
+            "type": "path",
+            "params": {"start": "Neural Network", "end": "Semantic Resonance", "max_depth": 3}
+          },
+          {
+            "type": "subgraph",
+            "params": {"center": "Quantum Resonance", "radius": 2}
+          }
+        ],
+        "counterfactual_queries": [
+          {
+            "query": "What if Transformers had been invented before Neural Networks?",
+            "entities": ["Transformer", "Neural Network"],
+            "altered_relation": {"source": "Transformer", "target": "Neural Network", "relation_type": 2}
+          },
+          {
+            "query": "How would Semantic Resonance differ if it wasn't inspired by Quantum Computing?",
+            "entities": ["Semantic Resonance", "Quantum Computing"],
+            "removed_path": ["Quantum Computing", "Quantum Resonance", "Semantic Resonance"]
+          }
+        ],
+        "generation_prompts": [
+          "Neural networks are",
+          "Transformers have revolutionized",
+          "The relationship between quantum computing and neural networks",
+          "Semantic resonance principles enable",
+          "Prime Hilbert encoding improves efficiency by",
+          "The homomorphic computational wrapper secures computation through"
+        ]
+      },
+      "quantum_evaluation": {
+        "sparsity_levels": [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95],
+        "patterns": ["harmonic", "hilbert", "cyclic", "prime", "orthogonal"],
+        "evolution_tracking": {
+          "steps": [10, 50, 100, 500, 1000],
+          "measure_metrics": ["sparsity", "loss", "resonance_factor"]
+        },
+        "mask_stability_test": {
+          "inputs": [
+            "Simple factual query with low uncertainty",
+            "Complex reasoning task with multiple steps",
+            "Ambiguous query with multiple valid interpretations",
+            "Novel domain requiring compositional generalization",
+            "Query with conflicting contextual information"
+          ],
+          "expected_iterations": [1, 4, 6, 5, 8]
+        }
+      }
+    }
+  },
+  "output_dir": "evaluation_results",
+  "visualize_metrics": [
+    "metric_comparison",
+    "parameter_breakdown",
+    "metric_heatmap",
+    "ablation_study",
+    "extension_comparison",
+    "efficiency_metrics",
+    "mask_evolution_heatmap",
+    "knowledge_graph",
+    "cross_modal_attention"
+  ]
+}
