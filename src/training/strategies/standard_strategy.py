@@ -1,20 +1,19 @@
 """
-Standard training strategy for language models.
+Standard training strategy for the enhanced training system.
 
-This module provides an implementation of a standard training strategy
-for language model training, supporting features like mixed precision,
-gradient accumulation, and proper optimization.
+This module implements a standard training strategy for language models,
+providing general-purpose training and evaluation functionality.
 """
 
-from typing import Dict, Any, Optional, Union, Tuple, List, Callable
 import logging
+import math
+from typing import Dict, Any, Optional, Union, Tuple, List
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.cuda.amp import autocast
+from torch.utils.data import DataLoader
 
-from src.config.training_config import TrainingConfig
 from src.training.strategies.base_strategy import TrainingStrategy
 
 
@@ -22,218 +21,431 @@ class StandardTrainingStrategy(TrainingStrategy):
     """
     Standard training strategy for language models.
     
-    This strategy implements common training procedures for standard language
-    models, including proper forward/backward passes, mixed precision training,
-    gradient accumulation, and optimization.
+    This strategy provides general-purpose training for language models,
+    including typical optimizers, schedulers, and validation procedures.
     """
     
     def __init__(
         self,
-        training_config: TrainingConfig,
+        config: Any,
         logger: Optional[logging.Logger] = None
     ):
         """
         Initialize the standard training strategy.
         
         Args:
-            training_config: Training configuration
+            config: Training configuration
             logger: Logger instance
         """
-        super().__init__(training_config, logger)
+        super().__init__(config, logger)
         
-        # Strategy-specific settings
-        self.logging_steps = getattr(training_config, "logging_steps", 10)
-        self.eval_steps = getattr(training_config, "eval_steps", 0)
-        self.save_steps = getattr(training_config, "save_steps", 0)
-        
-        # NaN prevention - specific to standard language model training
-        self.detect_anomaly = getattr(training_config, "detect_anomaly", False)
+        # Extract parameters
+        self.learning_rate = getattr(config, "learning_rate", 5e-5)
+        self.weight_decay = getattr(config, "weight_decay", 0.01)
+        self.max_grad_norm = getattr(config, "max_grad_norm", 1.0)
+        self.use_mixed_precision = getattr(config, "use_mixed_precision", True)
+        self.accumulation_steps = getattr(config, "accumulation_steps", 1)
     
+    def create_optimizer(
+        self,
+        model: nn.Module,
+        optimizer_type: str = "adamw",
+        **kwargs
+    ) -> optim.Optimizer:
+        """
+        Create an optimizer for the model.
+        
+        Args:
+            model: Model to optimize
+            optimizer_type: Type of optimizer
+            **kwargs: Additional optimizer parameters
+            
+        Returns:
+            Initialized optimizer
+        """
+        # Get parameters from kwargs or default to config
+        lr = kwargs.get("lr", self.learning_rate)
+        weight_decay = kwargs.get("weight_decay", self.weight_decay)
+        
+        # Get parameters that require gradients
+        parameters = [p for p in model.parameters() if p.requires_grad]
+        
+        # Create optimizer based on type
+        optimizer_type = optimizer_type.lower()
+        
+        if optimizer_type == "adamw":
+            self.logger.info(f"Creating AdamW optimizer with lr={lr}, weight_decay={weight_decay}")
+            return optim.AdamW(parameters, lr=lr, weight_decay=weight_decay)
+        
+        elif optimizer_type == "adam":
+            self.logger.info(f"Creating Adam optimizer with lr={lr}, weight_decay={weight_decay}")
+            return optim.Adam(parameters, lr=lr, weight_decay=weight_decay)
+        
+        elif optimizer_type == "sgd":
+            momentum = kwargs.get("momentum", 0.9)
+            self.logger.info(f"Creating SGD optimizer with lr={lr}, momentum={momentum}, weight_decay={weight_decay}")
+            return optim.SGD(parameters, lr=lr, momentum=momentum, weight_decay=weight_decay)
+        
+        elif optimizer_type == "adafactor":
+            # Use Adafactor from transformers if available
+            try:
+                from transformers.optimization import Adafactor
+                scale_parameter = kwargs.get("scale_parameter", True)
+                relative_step = kwargs.get("relative_step", False)
+                warmup_init = kwargs.get("warmup_init", False)
+                
+                self.logger.info(f"Creating Adafactor optimizer with lr={lr}")
+                return Adafactor(
+                    parameters,
+                    lr=lr if not relative_step else None,
+                    scale_parameter=scale_parameter,
+                    relative_step=relative_step,
+                    warmup_init=warmup_init
+                )
+            except ImportError:
+                self.logger.warning("Adafactor not available, falling back to AdamW")
+                return optim.AdamW(parameters, lr=lr, weight_decay=weight_decay)
+        
+        else:
+            self.logger.warning(f"Unknown optimizer type: {optimizer_type}, using AdamW")
+            return optim.AdamW(parameters, lr=lr, weight_decay=weight_decay)
+    
+    def create_scheduler(
+        self,
+        optimizer: optim.Optimizer,
+        scheduler_type: str = "linear",
+        num_training_steps: int = 1000,
+        num_warmup_steps: int = 0,
+        **kwargs
+    ) -> Optional[Any]:
+        """
+        Create a learning rate scheduler.
+        
+        Args:
+            optimizer: Optimizer to schedule
+            scheduler_type: Type of scheduler
+            num_training_steps: Total number of training steps
+            num_warmup_steps: Number of warmup steps
+            **kwargs: Additional scheduler parameters
+            
+        Returns:
+            Initialized scheduler or None
+        """
+        scheduler_type = scheduler_type.lower()
+        
+        # If no scheduler requested
+        if scheduler_type == "none" or scheduler_type == "constant":
+            return None
+        
+        # Try to use transformers schedulers if available
+        try:
+            from transformers.optimization import (
+                get_linear_schedule_with_warmup,
+                get_cosine_schedule_with_warmup,
+                get_cosine_with_hard_restarts_schedule_with_warmup,
+                get_polynomial_decay_schedule_with_warmup,
+                get_constant_schedule,
+                get_constant_schedule_with_warmup
+            )
+            
+            if scheduler_type == "linear":
+                self.logger.info(f"Creating linear scheduler with {num_warmup_steps} warmup steps")
+                return get_linear_schedule_with_warmup(
+                    optimizer, 
+                    num_warmup_steps=num_warmup_steps,
+                    num_training_steps=num_training_steps
+                )
+            
+            elif scheduler_type == "cosine":
+                self.logger.info(f"Creating cosine scheduler with {num_warmup_steps} warmup steps")
+                return get_cosine_schedule_with_warmup(
+                    optimizer, 
+                    num_warmup_steps=num_warmup_steps,
+                    num_training_steps=num_training_steps
+                )
+            
+            elif scheduler_type == "cosine_restarts":
+                num_cycles = kwargs.get("num_cycles", 1)
+                self.logger.info(f"Creating cosine scheduler with {num_warmup_steps} warmup steps and {num_cycles} restarts")
+                return get_cosine_with_hard_restarts_schedule_with_warmup(
+                    optimizer, 
+                    num_warmup_steps=num_warmup_steps,
+                    num_training_steps=num_training_steps,
+                    num_cycles=num_cycles
+                )
+            
+            elif scheduler_type == "polynomial":
+                power = kwargs.get("power", 1.0)
+                self.logger.info(f"Creating polynomial scheduler with {num_warmup_steps} warmup steps and power={power}")
+                return get_polynomial_decay_schedule_with_warmup(
+                    optimizer, 
+                    num_warmup_steps=num_warmup_steps,
+                    num_training_steps=num_training_steps,
+                    power=power
+                )
+            
+            elif scheduler_type == "constant_warmup":
+                self.logger.info(f"Creating constant scheduler with {num_warmup_steps} warmup steps")
+                return get_constant_schedule_with_warmup(
+                    optimizer,
+                    num_warmup_steps=num_warmup_steps
+                )
+                
+        except ImportError:
+            self.logger.warning("Transformers schedulers not available, using PyTorch schedulers")
+        
+        # Fall back to PyTorch schedulers
+        if scheduler_type == "linear":
+            # Simple linear scheduler with warmup using LambdaLR
+            def lr_lambda(current_step: int):
+                if current_step < num_warmup_steps:
+                    return float(current_step) / float(max(1, num_warmup_steps))
+                return max(
+                    0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps))
+                )
+            
+            self.logger.info(f"Creating linear scheduler with {num_warmup_steps} warmup steps")
+            return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        
+        elif scheduler_type == "cosine":
+            # Cosine scheduler with warmup using CosineAnnealingLR with warmup
+            if num_warmup_steps > 0:
+                self.logger.warning("PyTorch cosine scheduler does not support warmup, ignoring warmup steps")
+                
+            self.logger.info("Creating cosine annealing scheduler")
+            return optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, 
+                T_max=num_training_steps, 
+                eta_min=kwargs.get("eta_min", 0)
+            )
+        
+        elif scheduler_type == "step":
+            step_size = kwargs.get("step_size", num_training_steps // 3)
+            gamma = kwargs.get("gamma", 0.1)
+            
+            self.logger.info(f"Creating step scheduler with step_size={step_size}, gamma={gamma}")
+            return optim.lr_scheduler.StepLR(
+                optimizer,
+                step_size=step_size,
+                gamma=gamma
+            )
+        
+        elif scheduler_type == "exponential":
+            gamma = kwargs.get("gamma", 0.9)
+            
+            self.logger.info(f"Creating exponential scheduler with gamma={gamma}")
+            return optim.lr_scheduler.ExponentialLR(
+                optimizer,
+                gamma=gamma
+            )
+        
+        self.logger.warning(f"Unknown scheduler type: {scheduler_type}, not using scheduler")
+        return None
+        
     def train_step(
         self,
         model: nn.Module,
-        batch: Dict[str, torch.Tensor],
+        batch: Dict[str, Any],
         optimizer: optim.Optimizer,
         scaler: Optional[torch.cuda.amp.GradScaler] = None,
         scheduler: Optional[Any] = None,
         update_gradients: bool = True
     ) -> Dict[str, Any]:
         """
-        Execute a single training step.
+        Perform a single training step.
         
         Args:
-            model: Model instance
-            batch: Input batch
-            optimizer: Optimizer instance
-            scaler: Gradient scaler for mixed precision
+            model: Model to train
+            batch: Batch of data
+            optimizer: Optimizer to use
+            scaler: Gradient scaler for mixed-precision training
             scheduler: Learning rate scheduler
-            update_gradients: Whether to update gradients or just accumulate them
+            update_gradients: Whether to update gradients (for gradient accumulation)
             
         Returns:
-            Dictionary of step metrics (loss, etc.)
+            Dictionary of step statistics
         """
+        # Set model to training mode
         model.train()
         
-        # Get device from model
-        device = next(model.parameters()).device
+        # Track metrics
+        step_metrics = {}
         
-        # Enable anomaly detection during training if requested
-        torch.autograd.set_detect_anomaly(self.detect_anomaly)
+        # Check if mixed precision should be used
+        use_mixed_precision = scaler is not None
         
-        # Forward pass with mixed precision
-        with autocast(device_type=device.type, enabled=self.use_mixed_precision):
-            outputs = model(**batch)
-            
-            loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
-            
-            # Handle gradient accumulation
-            if self.accumulation_steps > 1:
-                loss = loss / self.accumulation_steps
+        # Extract batch inputs through adapter if available
+        if hasattr(model, "adapter") and hasattr(model.adapter, "prepare_batch"):
+            batch = model.adapter.prepare_batch(batch)
         
-        # Backward pass
-        if scaler is not None and self.use_mixed_precision and device.type == 'cuda':
-            # Use scaler for mixed precision
+        # Forward pass with autocast for mixed precision
+        if use_mixed_precision:
+            with torch.cuda.amp.autocast():
+                if hasattr(model, "adapter") and hasattr(model.adapter, "forward"):
+                    # Use adapter's forward method
+                    loss, outputs = model.adapter.forward(model, batch)
+                else:
+                    # Use standard forward with input_ids and attention_mask
+                    outputs = model(**batch)
+                    loss = outputs.get("loss")
+                    
+                # Save loss for reporting
+                step_metrics["loss"] = loss.item()
+        else:
+            # Standard precision forward
+            if hasattr(model, "adapter") and hasattr(model.adapter, "forward"):
+                # Use adapter's forward method
+                loss, outputs = model.adapter.forward(model, batch)
+            else:
+                # Use standard forward with input_ids and attention_mask
+                outputs = model(**batch)
+                loss = outputs.get("loss")
+                
+            # Save loss for reporting
+            step_metrics["loss"] = loss.item()
+        
+        # Scale the loss for gradient accumulation if needed
+        if self.accumulation_steps > 1:
+            loss = loss / self.accumulation_steps
+        
+        # Backward pass with scaler for mixed precision
+        if use_mixed_precision:
             scaler.scale(loss).backward()
         else:
-            # Standard backward
             loss.backward()
         
-        # Extract unscaled loss for reporting
-        step_loss = loss.item() * (self.accumulation_steps if self.accumulation_steps > 1 else 1)
-        
-        # Update weights if accumulation complete
+        # Update parameters if this is an update step
         if update_gradients:
-            grad_norm = 0.0
+            # Compute gradient norm for logging
+            grad_norm = self._compute_grad_norm(model)
+            step_metrics["grad_norm"] = grad_norm
             
-            # Unscale gradients if using mixed precision
-            if scaler is not None and self.use_mixed_precision and device.type == 'cuda':
-                scaler.unscale_(optimizer)
-            
-            # Clip gradients to prevent exploding gradients
-            grad_norm = self.clip_gradients(model, self.max_grad_norm)
-            
-            # Check for invalid gradients
-            valid_gradients = True
-            for param in model.parameters():
-                if param.grad is not None:
-                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                        valid_gradients = False
-                        self.logger.warning(f"NaN/Inf gradients detected at step {self.global_step}. Skipping update.")
-                        break
-            
-            if valid_gradients:
-                # Update weights
-                if scaler is not None and self.use_mixed_precision and device.type == 'cuda':
-                    scaler.step(optimizer)
-                    scaler.update()
+            # Clip gradients
+            if self.max_grad_norm > 0:
+                if use_mixed_precision:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), self.max_grad_norm)
                 else:
-                    optimizer.step()
-                
-                # Update learning rate scheduler
-                if scheduler is not None:
-                    scheduler.step()
-                
-                # Zero gradients
-                optimizer.zero_grad()
-                
-                # Update step count
-                self.global_step += 1
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), self.max_grad_norm)
             
-            # Get current learning rate
-            current_lr = scheduler.get_last_lr()[0] if scheduler is not None else optimizer.param_groups[0]['lr']
+            # Update parameters with scaler for mixed precision
+            if use_mixed_precision:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
             
-            # Return step metrics
-            return {
-                "loss": step_loss,
-                "grad_norm": grad_norm,
-                "learning_rate": current_lr,
-                "valid_gradients": valid_gradients
-            }
+            # Zero gradients
+            optimizer.zero_grad()
+            
+            # Update learning rate scheduler
+            if scheduler is not None:
+                scheduler.step()
+                step_metrics["learning_rate"] = self.get_learning_rate(optimizer)
         
-        # Return step metrics without gradient updates
-        return {
-            "loss": step_loss
-        }
+        # Return metrics
+        return step_metrics
     
-    def validation_step(
+    def validate(
         self,
         model: nn.Module,
-        batch: Dict[str, torch.Tensor]
+        dataloader: DataLoader,
+        device: torch.device
     ) -> Dict[str, Any]:
         """
-        Execute a single validation step.
+        Validate the model on a dataset.
         
         Args:
-            model: Model instance
-            batch: Input batch
+            model: Model to validate
+            dataloader: Validation dataloader
+            device: Device to use
             
         Returns:
             Dictionary of validation metrics
         """
+        # Set model to evaluation mode
         model.eval()
         
-        # Get device from model
-        device = next(model.parameters()).device
+        # Track metrics
+        total_loss = 0
+        total_elements = 0
+        all_metrics = {}
         
-        # Forward pass with mixed precision
+        # Check if model has adapter for computing metrics
+        compute_metrics = None
+        if hasattr(model, "adapter") and hasattr(model.adapter, "compute_metrics"):
+            compute_metrics = model.adapter.compute_metrics
+        
+        # Validation loop
         with torch.no_grad():
-            with autocast(device_type=device.type, enabled=self.use_mixed_precision):
-                outputs = model(**batch)
+            for batch in dataloader:
+                # Move batch to device
+                for k, v in batch.items():
+                    if isinstance(v, torch.Tensor):
+                        batch[k] = v.to(device)
                 
-                # Compute metrics based on outputs
-                metrics = self.compute_batch_metrics(outputs, batch)
+                # Extract batch inputs through adapter if available
+                if hasattr(model, "adapter") and hasattr(model.adapter, "prepare_batch"):
+                    batch = model.adapter.prepare_batch(batch)
+                
+                # Forward pass
+                if hasattr(model, "adapter") and hasattr(model.adapter, "forward"):
+                    # Use adapter's forward method
+                    loss, outputs = model.adapter.forward(model, batch, is_training=False)
+                else:
+                    # Use standard forward
+                    outputs = model(**batch)
+                    loss = outputs.get("loss")
+                
+                # Get batch size
+                batch_size = batch.get("input_ids").size(0) if "input_ids" in batch else 1
+                
+                # Track loss
+                total_loss += loss.item() * batch_size
+                total_elements += batch_size
+                
+                # Compute additional metrics if possible
+                if compute_metrics:
+                    batch_metrics = compute_metrics(outputs, batch)
+                    
+                    # Aggregate metrics
+                    for key, value in batch_metrics.items():
+                        if key not in all_metrics:
+                            all_metrics[key] = 0
+                        all_metrics[key] += value * batch_size
+        
+        # Compute average loss
+        avg_loss = total_loss / total_elements if total_elements > 0 else float("inf")
+        
+        # Compute average metrics
+        metrics = {"loss": avg_loss}
+        for key, value in all_metrics.items():
+            metrics[key] = value / total_elements if total_elements > 0 else 0
+        
+        # Compute perplexity
+        metrics["perplexity"] = math.exp(avg_loss)
         
         return metrics
     
-    def compute_batch_metrics(
-        self,
-        outputs: Union[Dict[str, Any], Tuple],
-        batch: Dict[str, torch.Tensor]
-    ) -> Dict[str, Any]:
+    def _compute_grad_norm(self, model: nn.Module) -> float:
         """
-        Compute metrics for a batch based on model outputs.
+        Compute gradient norm for the model.
         
         Args:
-            outputs: Model outputs
-            batch: Input batch
+            model: Model to compute gradient norm for
             
         Returns:
-            Dictionary of metrics
+            Gradient norm
         """
-        metrics = {}
+        total_norm = 0.0
+        parameters = [p for p in model.parameters() if p.grad is not None and p.requires_grad]
         
-        # Extract loss
-        if isinstance(outputs, dict) and "loss" in outputs:
-            metrics["loss"] = outputs["loss"].item()
-        elif isinstance(outputs, tuple) and len(outputs) > 0:
-            metrics["loss"] = outputs[0].item()
-        else:
-            # No explicit loss, return empty metrics
-            return metrics
-        
-        # Skip NaN losses
-        if torch.isnan(torch.tensor(metrics["loss"])).item() or torch.isinf(torch.tensor(metrics["loss"])).item():
-            self.logger.warning("Skipping NaN/Inf loss in metrics calculation")
-            metrics["loss"] = 0.0
-            return metrics
-        
-        # Calculate additional metrics
-        metrics["perplexity"] = torch.exp(torch.tensor(metrics["loss"])).item()
-        
-        # Additional metrics like accuracy if labels and logits are available
-        if isinstance(outputs, dict) and "logits" in outputs and "labels" in batch:
-            logits = outputs["logits"]
-            labels = batch["labels"]
+        if len(parameters) == 0:
+            return 0.0
             
-            # Calculate token-level accuracy if shapes match
-            if logits.shape[:-1] == labels.shape:
-                # Exclude padding tokens (-100) from accuracy calculation
-                mask = (labels != -100).float()
-                predictions = logits.argmax(dim=-1)
-                correct = ((predictions == labels) * mask).sum().item()
-                total = mask.sum().item()
-                
-                if total > 0:
-                    metrics["accuracy"] = correct / total
-        
-        return metrics
+        for p in parameters:
+            param_norm = p.grad.data.norm(2)
+            total_norm += param_norm.item() ** 2
+            
+        total_norm = total_norm ** 0.5
+        return total_norm

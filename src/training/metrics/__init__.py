@@ -1,8 +1,7 @@
 """
-Metrics tracking and logging for the enhanced training system.
+Metrics system for the enhanced training system.
 
-This package provides components for collecting, tracking, and reporting
-metrics during model training and evaluation.
+This package provides metrics logging and visualization functionality.
 """
 
 from src.training.metrics.metrics_logger import MetricsLogger

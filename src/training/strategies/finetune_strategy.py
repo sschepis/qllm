@@ -1,315 +1,441 @@
 """
-Finetuning strategy for pretrained language models.
+Finetuning strategy for the enhanced training system.
 
-This module provides a specialized training strategy for finetuning
-pretrained language models, with techniques like layer-wise learning rate
-decay and parameter-efficient fine-tuning.
+This module implements a specialized training strategy for finetuning
+pre-trained models with techniques like layer-wise learning rate decay.
 """
 
-from typing import Dict, Any, Optional, Union, Tuple, List, Callable
 import logging
+import math
+from typing import Dict, Any, Optional, Union, Tuple, List
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.cuda.amp import autocast
+from torch.utils.data import DataLoader
 
-from src.config.training_config import TrainingConfig
 from src.training.strategies.standard_strategy import StandardTrainingStrategy
 
 
 class FinetuningStrategy(StandardTrainingStrategy):
     """
-    Strategy for finetuning pretrained language models.
+    Specialized training strategy for finetuning pre-trained models.
     
-    This strategy extends the standard training strategy with optimizations
-    specific to finetuning, such as layer-wise learning rate decay and
-    more careful gradient handling.
+    This strategy extends the standard training strategy with specific
+    techniques for finetuning, such as layer-wise learning rate decay,
+    discriminative learning rates, and early stopping.
     """
     
     def __init__(
         self,
-        training_config: TrainingConfig,
+        config: Any,
         logger: Optional[logging.Logger] = None
     ):
         """
         Initialize the finetuning strategy.
         
         Args:
-            training_config: Training configuration
+            config: Training configuration
             logger: Logger instance
         """
-        super().__init__(training_config, logger)
+        super().__init__(config, logger)
         
-        # Finetuning-specific settings
-        self.layer_decay = getattr(training_config, "layer_decay", 0.9)
-        self.max_grad_norm = getattr(training_config, "max_grad_norm", 0.5)  # Lower for finetuning
-        self.weight_decay = getattr(training_config, "weight_decay", 0.01)
+        # Extract finetuning-specific parameters
+        self.lr_decay_rate = getattr(config, "lr_decay_rate", 0.8)
+        self.use_layerwise_lr = getattr(config, "use_layerwise_lr", True)
+        self.freeze_layers = getattr(config, "freeze_layers", None)
+        self.freeze_embeddings = getattr(config, "freeze_embeddings", False)
+        self.early_stopping_patience = getattr(config, "early_stopping_patience", 3)
+        self.early_stopping_threshold = getattr(config, "early_stopping_threshold", 0.01)
         
-        # Finetuning typically uses lower learning rates
-        if not hasattr(training_config, "finetune_learning_rate"):
-            self.learning_rate = getattr(training_config, "learning_rate", 5e-5) / 10
-            self.logger.info(f"Using reduced learning rate for finetuning: {self.learning_rate}")
-        else:
-            self.learning_rate = getattr(training_config, "finetune_learning_rate")
-        
-        # Early stopping for finetuning
-        self.patience = getattr(training_config, "patience", 3)
+        # Early stopping state
         self.best_val_loss = float('inf')
-        self.no_improvement_count = 0
+        self.patience_counter = 0
     
     def create_optimizer(
         self,
         model: nn.Module,
         optimizer_type: str = "adamw",
-        learning_rate: Optional[float] = None,
-        weight_decay: Optional[float] = None
+        **kwargs
     ) -> optim.Optimizer:
         """
-        Create an optimizer with layer-wise learning rate decay.
+        Create an optimizer with layer-wise learning rate decay for finetuning.
         
         Args:
-            model: Model instance
+            model: Model to optimize
             optimizer_type: Type of optimizer
-            learning_rate: Learning rate (uses finetuning rate if None)
-            weight_decay: Weight decay factor
+            **kwargs: Additional optimizer parameters
             
         Returns:
-            Initialized optimizer with layer-wise decay
+            Initialized optimizer
         """
-        # Use finetuning-specific values if not provided
-        lr = learning_rate if learning_rate is not None else self.learning_rate
-        wd = weight_decay if weight_decay is not None else self.weight_decay
+        # Get parameters from kwargs or default to config
+        lr = kwargs.get("lr", self.learning_rate)
+        weight_decay = kwargs.get("weight_decay", self.weight_decay)
         
-        # Check if we should use layer-wise learning rate decay
-        if self.layer_decay < 1.0:
-            return self._create_layer_wise_optimizer(model, optimizer_type, lr, wd)
+        # Handle layer freezing if specified
+        if self.freeze_layers is not None:
+            self._freeze_layers(model, self.freeze_layers)
+        
+        # Handle embedding freezing if specified
+        if self.freeze_embeddings:
+            self._freeze_embeddings(model)
+        
+        # If using layer-wise learning rate decay
+        if self.use_layerwise_lr:
+            # Get parameter groups with decayed learning rates
+            parameter_groups = self._get_layerwise_parameters(model, lr, weight_decay)
+            self.logger.info(f"Created {len(parameter_groups)} parameter groups with layerwise learning rate decay")
+            
+            # Create optimizer with parameter groups
+            if optimizer_type.lower() == "adamw":
+                return optim.AdamW(parameter_groups)
+            elif optimizer_type.lower() == "adam":
+                return optim.Adam(parameter_groups)
+            elif optimizer_type.lower() == "sgd":
+                momentum = kwargs.get("momentum", 0.9)
+                return optim.SGD(parameter_groups, momentum=momentum)
+            else:
+                self.logger.warning(f"Unknown optimizer type: {optimizer_type}, using AdamW")
+                return optim.AdamW(parameter_groups)
         else:
-            # Use standard optimizer creation
-            return super().create_optimizer(model, optimizer_type, lr, wd)
-    
-    def _create_layer_wise_optimizer(
-        self,
-        model: nn.Module,
-        optimizer_type: str,
-        learning_rate: float,
-        weight_decay: float
-    ) -> optim.Optimizer:
-        """
-        Create optimizer with layer-wise learning rate decay.
-        
-        Args:
-            model: Model instance
-            optimizer_type: Type of optimizer
-            learning_rate: Base learning rate
-            weight_decay: Weight decay factor
-            
-        Returns:
-            Optimizer with layer-wise decay
-        """
-        self.logger.info(f"Creating layer-wise optimizer with decay factor: {self.layer_decay}")
-        
-        # Group parameters by layer depth and weight decay exclusion
-        no_decay = ["bias", "LayerNorm.weight", "layer_norm.weight", "layernorm.weight"]
-        layer_wise_groups = []
-        
-        # Get all named parameters
-        named_parameters = list(model.named_parameters())
-        
-        # Identify the number of transformer layers
-        num_layers = self._get_num_layers(model)
-        
-        # Process each parameter, assigning learning rate based on layer depth
-        for name, param in named_parameters:
-            # Skip non-trainable parameters
-            if not param.requires_grad:
-                continue
-            
-            # Determine layer index
-            layer_idx = self._get_layer_index(name, num_layers)
-            
-            # Calculate learning rate with decay
-            # Parameters in higher layers get higher learning rates
-            layer_lr = learning_rate * (self.layer_decay ** (num_layers - 1 - layer_idx))
-            
-            # Determine weight decay
-            decay_status = 0.0 if any(nd in name for nd in no_decay) else weight_decay
-            
-            # Add parameter to appropriate group
-            layer_wise_groups.append({
-                "params": [param],
-                "lr": layer_lr,
-                "weight_decay": decay_status,
-                "layer_idx": layer_idx
-            })
-            
-            # Log layer assignment for debugging
-            if layer_idx >= 0:
-                self.logger.debug(f"Parameter {name} assigned to layer {layer_idx} with lr {layer_lr:.6f}")
-        
-        # Create optimizer based on type
-        optimizer_type = optimizer_type.lower()
-        
-        if optimizer_type == "adamw":
-            return optim.AdamW(layer_wise_groups)
-        elif optimizer_type == "adam":
-            return optim.Adam(layer_wise_groups)
-        else:
-            self.logger.warning(f"Unsupported optimizer type for layer-wise decay: {optimizer_type}. Using AdamW.")
-            return optim.AdamW(layer_wise_groups)
-    
-    def _get_num_layers(self, model: nn.Module) -> int:
-        """
-        Determine the number of transformer layers in the model.
-        
-        Args:
-            model: Model instance
-            
-        Returns:
-            Number of transformer layers
-        """
-        # Look for common patterns in model structure
-        if hasattr(model, "num_layers"):
-            return model.num_layers
-        elif hasattr(model, "config") and hasattr(model.config, "num_hidden_layers"):
-            return model.config.num_hidden_layers
-        
-        # Count layers by name pattern
-        layer_names = [name for name, _ in model.named_modules() 
-                      if "layer" in name and name.count(".") == 1]
-        
-        # If layer names found, return count
-        if layer_names:
-            return max([int(name.split(".")[-1]) for name in layer_names]) + 1
-        
-        # Default to 12 layers (standard for many models)
-        self.logger.warning("Could not determine number of layers, using default of 12")
-        return 12
-    
-    def _get_layer_index(self, param_name: str, num_layers: int) -> int:
-        """
-        Determine the layer index of a parameter.
-        
-        Args:
-            param_name: Name of the parameter
-            num_layers: Total number of layers
-            
-        Returns:
-            Layer index (0 to num_layers-1), or -1 for non-layer parameters
-        """
-        # Embeddings are typically in the lowest layer
-        if "embed" in param_name:
-            return 0
-        
-        # Check for common layer naming patterns
-        # Format: model.layers.X.parameter
-        if ".layer." in param_name or ".layers." in param_name:
-            parts = param_name.split(".")
-            for i, part in enumerate(parts):
-                if part == "layer" or part == "layers":
-                    if i + 1 < len(parts) and parts[i + 1].isdigit():
-                        return int(parts[i + 1])
-        
-        # Format: model.transformer.layerX.parameter
-        for i in range(num_layers):
-            if f".layer{i}." in param_name or f".layer.{i}." in param_name:
-                return i
-        
-        # Format: model.encoder.layer.X.parameter
-        if ".encoder.layer." in param_name:
-            parts = param_name.split("encoder.layer.")[1].split(".")
-            if parts[0].isdigit():
-                return int(parts[0])
-        
-        # Head parameters typically get the highest learning rate
-        if "head" in param_name or "output" in param_name or "classifier" in param_name:
-            return num_layers - 1
-        
-        # Unknown parameter - use middle layer as default
-        return num_layers // 2
-    
-    def train_step(
-        self,
-        model: nn.Module,
-        batch: Dict[str, torch.Tensor],
-        optimizer: optim.Optimizer,
-        scaler: Optional[torch.cuda.amp.GradScaler] = None,
-        scheduler: Optional[Any] = None,
-        update_gradients: bool = True
-    ) -> Dict[str, Any]:
-        """
-        Execute a single finetuning step.
-        
-        Args:
-            model: Model instance
-            batch: Input batch
-            optimizer: Optimizer instance
-            scaler: Gradient scaler for mixed precision
-            scheduler: Learning rate scheduler
-            update_gradients: Whether to update gradients or just accumulate them
-            
-        Returns:
-            Dictionary of step metrics (loss, etc.)
-        """
-        # Use standard training step from parent class
-        metrics = super().train_step(
-            model=model,
-            batch=batch,
-            optimizer=optimizer,
-            scaler=scaler,
-            scheduler=scheduler,
-            update_gradients=update_gradients
-        )
-        
-        # Add finetuning-specific metrics
-        if update_gradients and "valid_gradients" in metrics and metrics["valid_gradients"]:
-            metrics["layer_lrs"] = self._get_layer_learning_rates(optimizer)
-        
-        return metrics
-    
-    def _get_layer_learning_rates(self, optimizer: optim.Optimizer) -> Dict[int, float]:
-        """
-        Get learning rates for each layer from the optimizer.
-        
-        Args:
-            optimizer: Optimizer instance with layer-wise groups
-            
-        Returns:
-            Dictionary mapping layer indices to learning rates
-        """
-        layer_lrs = {}
-        
-        for group in optimizer.param_groups:
-            if "layer_idx" in group:
-                layer_idx = group["layer_idx"]
-                if layer_idx not in layer_lrs:
-                    layer_lrs[layer_idx] = group["lr"]
-        
-        return layer_lrs
+            # Use standard optimizer without layer-wise decay
+            return super().create_optimizer(model, optimizer_type, **kwargs)
     
     def check_early_stopping(self, val_loss: float) -> bool:
         """
-        Check if early stopping should be triggered.
+        Check if early stopping criteria are met.
         
         Args:
             val_loss: Validation loss
             
         Returns:
-            True if training should stop, False otherwise
+            True if early stopping should be triggered, False otherwise
         """
-        if val_loss < self.best_val_loss:
-            relative_improvement = (self.best_val_loss - val_loss) / self.best_val_loss
+        # If no early stopping
+        if self.early_stopping_patience <= 0:
+            return False
+        
+        # Check if this is the best loss so far
+        if val_loss < self.best_val_loss * (1 - self.early_stopping_threshold):
+            # New best loss
             self.best_val_loss = val_loss
-            self.no_improvement_count = 0
-            
-            self.logger.info(f"Validation loss improved to {val_loss:.6f} ({relative_improvement:.2%} improvement)")
+            self.patience_counter = 0
             return False
         else:
-            self.no_improvement_count += 1
-            self.logger.info(f"No improvement in validation loss for {self.no_improvement_count} evaluations")
+            # No improvement
+            self.patience_counter += 1
             
-            if self.no_improvement_count >= self.patience:
-                self.logger.info(f"Early stopping triggered after {self.no_improvement_count} evaluations without improvement")
+            # Check if patience is exhausted
+            if self.patience_counter >= self.early_stopping_patience:
+                self.logger.info(f"Early stopping triggered after {self.patience_counter} epochs without improvement")
                 return True
             
+            self.logger.info(f"No improvement for {self.patience_counter} epochs, best loss: {self.best_val_loss:.6f}")
             return False
+    
+    def _get_layerwise_parameters(
+        self,
+        model: nn.Module,
+        lr: float,
+        weight_decay: float
+    ) -> List[Dict[str, Any]]:
+        """
+        Get parameter groups with layer-wise learning rate decay.
+        
+        Args:
+            model: Model to get parameters for
+            lr: Base learning rate
+            weight_decay: Weight decay
+            
+        Returns:
+            List of parameter group dictionaries
+        """
+        parameter_groups = []
+        
+        # Check if model is a transformers model
+        is_transformers_model = self._is_transformers_model(model)
+        
+        if is_transformers_model:
+            # Handle transformers models
+            return self._get_transformers_layerwise_parameters(model, lr, weight_decay)
+        
+        # Try to identify model structure
+        layers = self._identify_model_layers(model)
+        
+        if layers:
+            # Create parameter groups for identified layers
+            num_layers = len(layers)
+            
+            for layer_idx, layer in enumerate(layers):
+                # Calculate decayed learning rate
+                layer_lr = lr * (self.lr_decay_rate ** (num_layers - layer_idx - 1))
+                
+                # Create parameter group
+                parameter_groups.append({
+                    'params': layer.parameters(),
+                    'lr': layer_lr,
+                    'weight_decay': weight_decay
+                })
+                
+                self.logger.debug(f"Layer {layer_idx}: lr={layer_lr:.2e}")
+        else:
+            # Fallback to simple decay by parameter name pattern
+            return self._get_parameters_by_name_pattern(model, lr, weight_decay)
+        
+        return parameter_groups
+    
+    def _get_transformers_layerwise_parameters(
+        self,
+        model: nn.Module,
+        lr: float,
+        weight_decay: float
+    ) -> List[Dict[str, Any]]:
+        """
+        Get parameter groups for transformers models with layer-wise decay.
+        
+        Args:
+            model: Transformers model
+            lr: Base learning rate
+            weight_decay: Weight decay
+            
+        Returns:
+            List of parameter group dictionaries
+        """
+        parameter_groups = []
+        
+        # Collect parameters by layer depth
+        names_to_params = {}
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                names_to_params[name] = param
+        
+        # Embeddings typically in transformers models
+        emb_params = []
+        # Collect embedding parameters
+        for name, param in names_to_params.items():
+            if 'embed' in name or 'embedding' in name or 'wte' in name or 'wpe' in name:
+                emb_params.append(param)
+                names_to_params.pop(name)
+        
+        if emb_params:
+            # Lowest learning rate for embeddings
+            emb_lr = lr * (self.lr_decay_rate ** 12)  # Assuming 12 layers
+            parameter_groups.append({
+                'params': emb_params,
+                'lr': emb_lr,
+                'weight_decay': weight_decay
+            })
+            self.logger.debug(f"Embeddings: lr={emb_lr:.2e}")
+        
+        # Collect layer parameters (assuming layers are numbered)
+        layer_params = {}
+        remaining_params = []
+        
+        for name, param in names_to_params.items():
+            found_layer = False
+            
+            # Try to extract layer number from name
+            for pattern in [r'layer\.(\d+)', r'layers\.(\d+)', r'h\.(\d+)', r'encoder\.(\d+)', r'decoder\.(\d+)']:
+                import re
+                match = re.search(pattern, name)
+                if match:
+                    layer_idx = int(match.group(1))
+                    if layer_idx not in layer_params:
+                        layer_params[layer_idx] = []
+                    layer_params[layer_idx].append(param)
+                    found_layer = True
+                    break
+            
+            if not found_layer:
+                remaining_params.append(param)
+        
+        # Create parameter groups for each layer
+        if layer_params:
+            num_layers = max(layer_params.keys()) + 1
+            
+            for layer_idx in sorted(layer_params.keys()):
+                # Calculate decayed learning rate
+                layer_lr = lr * (self.lr_decay_rate ** (num_layers - layer_idx - 1))
+                
+                # Create parameter group
+                parameter_groups.append({
+                    'params': layer_params[layer_idx],
+                    'lr': layer_lr,
+                    'weight_decay': weight_decay
+                })
+                
+                self.logger.debug(f"Layer {layer_idx}: lr={layer_lr:.2e}")
+        
+        # Add remaining parameters with base learning rate
+        if remaining_params:
+            parameter_groups.append({
+                'params': remaining_params,
+                'lr': lr,
+                'weight_decay': weight_decay
+            })
+            self.logger.debug(f"Remaining params: lr={lr:.2e}")
+        
+        return parameter_groups
+    
+    def _get_parameters_by_name_pattern(
+        self,
+        model: nn.Module,
+        lr: float,
+        weight_decay: float
+    ) -> List[Dict[str, Any]]:
+        """
+        Get parameter groups by name pattern.
+        
+        Args:
+            model: Model to get parameters for
+            lr: Base learning rate
+            weight_decay: Weight decay
+            
+        Returns:
+            List of parameter group dictionaries
+        """
+        # Define parameter groups with heuristic patterns
+        groups = {
+            'embedding': {'params': [], 'lr': lr * (self.lr_decay_rate ** 6)},
+            'early_layers': {'params': [], 'lr': lr * (self.lr_decay_rate ** 4)},
+            'middle_layers': {'params': [], 'lr': lr * (self.lr_decay_rate ** 2)},
+            'late_layers': {'params': [], 'lr': lr},
+            'other': {'params': [], 'lr': lr}
+        }
+        
+        # Add weight decay to all groups
+        for group in groups.values():
+            group['weight_decay'] = weight_decay
+        
+        # Assign parameters to groups based on name patterns
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+                
+            if 'embed' in name or 'embedding' in name:
+                groups['embedding']['params'].append(param)
+            elif any(p in name for p in ['layer.0', 'layer.1', 'layer.2', 'blocks.0', 'blocks.1', 'blocks.2']):
+                groups['early_layers']['params'].append(param)
+            elif any(p in name for p in ['layer.3', 'layer.4', 'layer.5', 'blocks.3', 'blocks.4', 'blocks.5']):
+                groups['middle_layers']['params'].append(param)
+            elif any(p in name for p in ['layer.6', 'layer.7', 'layer.8', 'blocks.6', 'blocks.7', 'blocks.8']):
+                groups['late_layers']['params'].append(param)
+            else:
+                groups['other']['params'].append(param)
+        
+        # Filter out empty groups
+        parameter_groups = [group for group in groups.values() if group['params']]
+        
+        # Log parameter groups
+        for name, group in groups.items():
+            if group['params']:
+                self.logger.debug(f"{name}: {len(group['params'])} params, lr={group['lr']:.2e}")
+        
+        return parameter_groups
+    
+    def _identify_model_layers(self, model: nn.Module) -> List[nn.Module]:
+        """
+        Identify model layers for layerwise learning rate decay.
+        
+        Args:
+            model: Model to identify layers in
+            
+        Returns:
+            List of identified layer modules
+        """
+        layers = []
+        
+        # Try to find transformer layers or blocks
+        if hasattr(model, 'encoder') and hasattr(model.encoder, 'layers'):
+            # Transformer encoder layers
+            layers = list(model.encoder.layers)
+            self.logger.debug(f"Found {len(layers)} transformer encoder layers")
+        elif hasattr(model, 'decoder') and hasattr(model.decoder, 'layers'):
+            # Transformer decoder layers
+            layers = list(model.decoder.layers)
+            self.logger.debug(f"Found {len(layers)} transformer decoder layers")
+        elif hasattr(model, 'transformer') and hasattr(model.transformer, 'layers'):
+            # GPT-style transformer layers
+            layers = list(model.transformer.layers)
+            self.logger.debug(f"Found {len(layers)} transformer layers")
+        elif hasattr(model, 'transformer') and hasattr(model.transformer, 'h'):
+            # Hugging Face transformer layers
+            layers = list(model.transformer.h)
+            self.logger.debug(f"Found {len(layers)} Hugging Face transformer layers")
+        elif hasattr(model, 'blocks'):
+            # Vision transformer blocks
+            layers = list(model.blocks)
+            self.logger.debug(f"Found {len(layers)} vision transformer blocks")
+        elif hasattr(model, 'layers'):
+            # Generic layers
+            layers = list(model.layers)
+            self.logger.debug(f"Found {len(layers)} generic layers")
+        
+        return layers
+    
+    def _is_transformers_model(self, model: nn.Module) -> bool:
+        """
+        Check if the model is from the Hugging Face transformers library.
+        
+        Args:
+            model: Model to check
+            
+        Returns:
+            True if the model is from transformers, False otherwise
+        """
+        try:
+            from transformers import PreTrainedModel
+            return isinstance(model, PreTrainedModel)
+        except ImportError:
+            # If transformers is not available, check the module name
+            return 'transformers' in str(type(model).__module__)
+    
+    def _freeze_layers(self, model: nn.Module, num_layers: Union[int, List[int]]) -> None:
+        """
+        Freeze specified layers of the model.
+        
+        Args:
+            model: Model to freeze layers in
+            num_layers: Number of layers to freeze (from bottom) or list of layer indices
+        """
+        layers = self._identify_model_layers(model)
+        
+        if not layers:
+            self.logger.warning("Could not identify layers to freeze")
+            return
+        
+        # If num_layers is an integer, freeze that many layers from the bottom
+        if isinstance(num_layers, int):
+            layers_to_freeze = layers[:num_layers]
+            self.logger.info(f"Freezing {num_layers} layers from the bottom")
+        else:
+            # If num_layers is a list, freeze those specific layers
+            layers_to_freeze = [layers[i] for i in num_layers if i < len(layers)]
+            self.logger.info(f"Freezing layers at indices: {num_layers}")
+        
+        # Freeze parameters in selected layers
+        for layer in layers_to_freeze:
+            for param in layer.parameters():
+                param.requires_grad = False
+    
+    def _freeze_embeddings(self, model: nn.Module) -> None:
+        """
+        Freeze embedding layers of the model.
+        
+        Args:
+            model: Model to freeze embeddings in
+        """
+        # Try to find embedding layers
+        embedding_found = False
+        
+        # Check common embedding layer names
+        for name, module in model.named_modules():
+            if any(embed_name in name.lower() for embed_name in ['embed', 'embedding', 'wte', 'wpe']):
+                for param in module.parameters():
+                    param.requires_grad = False
+                embedding_found = True
+                self.logger.info(f"Froze embedding parameters in {name}")
+        
+        if not embedding_found:
+            self.logger.warning("Could not identify embedding layers to freeze")

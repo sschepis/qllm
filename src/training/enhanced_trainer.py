@@ -1,33 +1,25 @@
 """
-Enhanced trainer for the Quantum Resonance Language Model.
+Enhanced trainer for the QLLM training system.
 
-This module provides a modular, extensible trainer that supports various model types,
-training strategies, and extensions through a plugin architecture.
+This module provides the core enhanced trainer implementation that coordinates
+various components like model adapters, training strategies, and extensions.
 """
 
 import os
-import json
 import logging
 import time
-from typing import Dict, Any, Optional, List, Tuple, Union, Type
+from typing import Dict, Any, Optional, Union, Tuple, List
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 
 from src.config.model_config import ModelConfig
 from src.config.training_config import TrainingConfig
 from src.config.data_config import DataConfig
-from src.utils.device import get_device
 
-from src.training.model_adapters import (
-    ModelAdapter, get_model_adapter,
-    StandardModelAdapter, DialogueModelAdapter, MultimodalModelAdapter
-)
-from src.training.strategies import (
-    TrainingStrategy, get_training_strategy, 
-    StandardTrainingStrategy, FinetuningStrategy
-)
+from src.training.model_adapters import ModelAdapter
+from src.training.strategies import TrainingStrategy
 from src.training.extensions import ExtensionManager
 from src.training.checkpoints import CheckpointManager
 from src.training.metrics import MetricsLogger
@@ -35,12 +27,10 @@ from src.training.metrics import MetricsLogger
 
 class EnhancedTrainer:
     """
-    Enhanced trainer implementation for QLLM.
+    Enhanced trainer for the QLLM training system.
     
-    This trainer provides a modular architecture that supports different model types,
-    training strategies, and extensions through a plugin system. It handles the
-    coordination between these components and provides a unified interface for
-    training and evaluation.
+    This trainer coordinates model adapters, training strategies, and extensions
+    to provide a flexible and modular training experience.
     """
     
     def __init__(
@@ -54,7 +44,7 @@ class EnhancedTrainer:
         training_strategy: Optional[TrainingStrategy] = None,
         extension_manager: Optional[ExtensionManager] = None,
         checkpoint_manager: Optional[CheckpointManager] = None,
-        metrics_logger: Optional[MetricsLogger] = None
+        metrics_logger: Optional[Any] = None
     ):
         """
         Initialize the enhanced trainer.
@@ -63,587 +53,653 @@ class EnhancedTrainer:
             model_config: Model configuration
             training_config: Training configuration
             data_config: Data configuration
-            output_dir: Directory for outputs (default: from training_config)
+            output_dir: Directory for outputs
             logger: Logger instance
-            model_adapter: Model adapter instance (created from config if None)
-            training_strategy: Training strategy instance (created from config if None)
-            extension_manager: Extension manager instance (created from config if None)
-            checkpoint_manager: Checkpoint manager instance (created from config if None)
-            metrics_logger: Metrics logger instance (created from config if None)
+            model_adapter: Model adapter instance
+            training_strategy: Training strategy instance
+            extension_manager: Extension manager instance
+            checkpoint_manager: Checkpoint manager instance
+            metrics_logger: Metrics logger instance
         """
+        # Configure logger
+        self.logger = logger or logging.getLogger("quantum_resonance")
+        
         # Store configurations
         self.model_config = model_config
         self.training_config = training_config
         self.data_config = data_config
         
         # Set output directory
-        self.output_dir = output_dir or getattr(training_config, "output_dir", None)
-        if not self.output_dir:
-            # Default output directory
-            self.output_dir = os.path.join("runs", "quantum_resonance")
+        self.output_dir = output_dir
+        if self.output_dir is None:
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            model_name = getattr(model_config, "model_name", "quantum_resonance")
+            self.output_dir = os.path.join("runs", f"{model_name}_{timestamp}")
         
-        # Create output directory
         os.makedirs(self.output_dir, exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, "checkpoints"), exist_ok=True)
         
-        # Set logger
-        self.logger = logger or logging.getLogger("quantum_resonance")
-        
-        # Set device
-        self.device = self._get_device()
-        self.logger.info(f"Using device: {self.device}")
-        
-        # Initialize components (use provided instances or create from config)
+        # Set model adapter
         self.model_adapter = model_adapter
+        
+        # Set training strategy
         self.training_strategy = training_strategy
+        
+        # Set extension manager
         self.extension_manager = extension_manager
+        
+        # Set checkpoint manager
         self.checkpoint_manager = checkpoint_manager
+        
+        # Set metrics logger
         self.metrics_logger = metrics_logger
         
-        # Data components
-        self.dataloaders: Dict[str, DataLoader] = {}
-        
-        # Training state
+        # Initialize components to None (will be set in initialize_* methods)
         self.model = None
         self.tokenizer = None
         self.optimizer = None
         self.scheduler = None
-        
-        self.global_step = 0
-        self.current_epoch = 0
-        self.best_val_loss = float('inf')
-        
-        # Mixed precision support
-        self.use_mixed_precision = getattr(training_config, "use_mixed_precision", True)
         self.scaler = None
-        if self.use_mixed_precision and torch.cuda.is_available():
-            self.scaler = torch.cuda.amp.GradScaler()
-            self.logger.info("Using mixed precision training")
+        self.dataloaders = {}
+        
+        # Training state
+        self.current_epoch = 0
+        self.global_step = 0
+        self.best_val_loss = float('inf')
+        self.early_stop = False
         
         # Save configuration
-        self.save_config()
-        
-        # Initialize all components
-        self.initialize()
+        self._save_config()
     
-    def _get_device(self) -> torch.device:
+    def initialize_model(self) -> nn.Module:
         """
-        Get the appropriate device.
+        Initialize the model.
         
         Returns:
-            Device to use
+            Initialized model
         """
-        device_str = getattr(self.training_config, "device", None)
-        return get_device(device_str)
-    
-    def save_config(self) -> None:
-        """Save configuration to the output directory."""
-        # Create config dictionary
-        config = {
-            "model": self.model_config.to_dict() if hasattr(self.model_config, "to_dict") else vars(self.model_config),
-            "training": self.training_config.to_dict() if hasattr(self.training_config, "to_dict") else vars(self.training_config),
-            "data": self.data_config.to_dict() if hasattr(self.data_config, "to_dict") else vars(self.data_config)
-        }
+        self.logger.info("Initializing model")
         
-        # Save config
-        try:
-            with open(os.path.join(self.output_dir, "config.json"), "w") as f:
-                json.dump(config, f, indent=2)
-            self.logger.info(f"Configuration saved to {os.path.join(self.output_dir, 'config.json')}")
-        except Exception as e:
-            self.logger.warning(f"Error saving configuration: {e}")
-    
-    def initialize(self) -> None:
-        """Initialize all components of the training system."""
-        # Initialize model adapter if not provided
+        # Create model using adapter
         if self.model_adapter is None:
-            model_type = getattr(self.training_config, "model_type", "standard")
-            self.model_adapter = get_model_adapter(
-                model_type, 
-                self.model_config, 
-                self.training_config, 
-                self.device, 
-                self.logger
-            )
-            self.logger.info(f"Using model adapter: {type(self.model_adapter).__name__}")
+            raise ValueError("Model adapter not set. Call set_model_adapter first.")
         
-        # Initialize training strategy if not provided
-        if self.training_strategy is None:
-            strategy_type = getattr(self.training_config, "training_strategy", "standard")
-            self.training_strategy = get_training_strategy(
-                strategy_type,
-                self.training_config,
-                self.logger
-            )
-            self.logger.info(f"Using training strategy: {type(self.training_strategy).__name__}")
-        
-        # Initialize extension manager if not provided
-        if self.extension_manager is None:
-            self.extension_manager = ExtensionManager(
-                self.training_config,
-                self.logger
-            )
-            self.logger.info(f"Extension manager initialized with {len(self.extension_manager.get_extension_names())} extensions")
-        
-        # Initialize checkpoint manager if not provided
-        if self.checkpoint_manager is None:
-            self.checkpoint_manager = CheckpointManager(
-                self.training_config,
-                self.output_dir,
-                self.logger
-            )
-            self.logger.info(f"Checkpoint manager initialized")
-        
-        # Initialize metrics logger if not provided
-        if self.metrics_logger is None:
-            self.metrics_logger = MetricsLogger(
-                self.output_dir,
-                log_to_console=True,
-                log_to_tensorboard=getattr(self.training_config, "use_tensorboard", True),
-                log_to_file=True,
-                logger=self.logger
-            )
-            self.logger.info(f"Metrics logger initialized")
-        
-        # Initialize model and tokenizer through the adapter
-        self.initialize_model_and_tokenizer()
-        
-        # Initialize dataloaders
-        self.initialize_dataloaders()
-        
-        # Initialize optimizer and scheduler
-        self.initialize_optimizer_and_scheduler()
-        
-        # Try to resume from checkpoint if enabled
-        if getattr(self.training_config, "auto_resume", False):
-            self.try_resume_from_checkpoint()
-    
-    def initialize_model_and_tokenizer(self) -> None:
-        """Initialize model and tokenizer using the model adapter."""
-        self.logger.info("Initializing model and tokenizer")
-        
-        # Create model through adapter
         self.model = self.model_adapter.create_model()
         
-        # Register extensions with model
-        self.model = self.extension_manager.register_with_model(self.model)
+        # Register model with adapter
+        self.model_adapter.set_model(self.model)
         
-        # Create tokenizer through adapter
+        # Register extensions with model if available
+        if self.extension_manager is not None:
+            self.model = self.extension_manager.register_with_model(self.model)
+        
+        # Set model as attribute on trainer for easy access
+        if hasattr(self.model, "trainer"):
+            self.logger.warning("Model already has 'trainer' attribute, not overwriting")
+        else:
+            self.model.trainer = self
+        
+        # Set adapter as attribute on model for easy access
+        if hasattr(self.model, "adapter"):
+            self.logger.warning("Model already has 'adapter' attribute, not overwriting")
+        else:
+            self.model.adapter = self.model_adapter
+        
+        return self.model
+    
+    def initialize_tokenizer(self) -> Any:
+        """
+        Initialize the tokenizer.
+        
+        Returns:
+            Initialized tokenizer
+        """
+        self.logger.info("Initializing tokenizer")
+        
+        # Create tokenizer using adapter
+        if self.model_adapter is None:
+            raise ValueError("Model adapter not set. Call set_model_adapter first.")
+        
         self.tokenizer = self.model_adapter.create_tokenizer()
         
-        # Set tokenizer in adapter (in case it was created externally)
+        # Register tokenizer with adapter
         self.model_adapter.set_tokenizer(self.tokenizer)
         
-        # Set model in adapter (in case it was created externally)
-        self.model_adapter.set_model(self.model)
+        return self.tokenizer
     
-    def initialize_dataloaders(self) -> None:
-        """Initialize dataloaders from configuration."""
+    def initialize_dataloaders(self) -> Dict[str, DataLoader]:
+        """
+        Initialize dataloaders.
+        
+        Returns:
+            Dictionary of dataloaders
+        """
         self.logger.info("Initializing dataloaders")
         
-        # Import the appropriate dataloaders function
-        from src.data.dataloaders import get_appropriate_dataloaders
+        # Import dataloader utils
+        from src.data.dataloader_utils import create_dataloaders
         
-        # Get batch sizes from training config
-        batch_size = getattr(self.training_config, "batch_size", 8)
-        eval_batch_size = getattr(self.training_config, "eval_batch_size", batch_size)
-        
-        # Get dataloaders
-        self.dataloaders = get_appropriate_dataloaders(
-            data_config=self.data_config,
-            tokenizer=self.tokenizer,
-            batch_size=batch_size,
-            eval_batch_size=eval_batch_size,
-            num_workers=getattr(self.data_config, "preprocessing_num_workers", 0)
+        # Create dataloaders
+        self.dataloaders = create_dataloaders(
+            self.data_config,
+            self.tokenizer,
+            self.training_config.batch_size,
+            self.training_config.num_workers
         )
         
-        # Log dataset sizes
-        self.logger.info(f"Dataset sizes:")
-        for split, dataloader in self.dataloaders.items():
-            self.logger.info(f"  {split}: {len(dataloader.dataset)} examples, {len(dataloader)} batches")
+        return self.dataloaders
     
-    def initialize_optimizer_and_scheduler(self) -> None:
-        """Initialize optimizer and learning rate scheduler from training strategy."""
+    def initialize_optimizer(self) -> Tuple[torch.optim.Optimizer, Any]:
+        """
+        Initialize optimizer and scheduler.
+        
+        Returns:
+            Tuple of (optimizer, scheduler)
+        """
         self.logger.info("Initializing optimizer and scheduler")
         
-        # Calculate total training steps
-        num_epochs = getattr(self.training_config, "max_epochs", 1)
-        steps_per_epoch = len(self.dataloaders.get("train", []))
-        total_steps = num_epochs * steps_per_epoch
-        self.logger.info(f"Training for {num_epochs} epochs, {steps_per_epoch} steps per epoch, {total_steps} total steps")
+        # Check if model is initialized
+        if self.model is None:
+            raise ValueError("Model not initialized. Call initialize_model first.")
         
-        # Create optimizer from training strategy
-        optimizer_type = getattr(self.training_config, "optimizer", "adamw")
+        # Get optimizer type
+        optimizer_type = getattr(self.training_config, "optimizer_type", "adamw")
+        
+        # Create optimizer using strategy
         self.optimizer = self.training_strategy.create_optimizer(
             self.model,
-            optimizer_type=optimizer_type
+            optimizer_type=optimizer_type,
+            lr=self.training_config.learning_rate,
+            weight_decay=self.training_config.weight_decay
         )
         
-        # Create scheduler from training strategy
-        scheduler_type = getattr(self.training_config, "lr_scheduler", "linear")
+        # Get scheduler type
+        scheduler_type = getattr(self.training_config, "scheduler_type", "linear")
+        
+        # Calculate number of training steps
+        if "train" not in self.dataloaders:
+            self.logger.warning("Training dataloader not initialized. Cannot calculate number of training steps.")
+            num_training_steps = 1000
+        else:
+            train_dataloader = self.dataloaders["train"]
+            steps_per_epoch = len(train_dataloader)
+            num_training_steps = steps_per_epoch * self.training_config.max_epochs
+        
+        # Calculate number of warmup steps
+        num_warmup_steps = int(self.training_config.warmup_ratio * num_training_steps)
+        
+        # Create scheduler using strategy
         self.scheduler = self.training_strategy.create_scheduler(
             self.optimizer,
             scheduler_type=scheduler_type,
-            num_training_steps=total_steps,
-            num_warmup_steps=getattr(self.training_config, "warmup_steps", int(0.1 * total_steps))
+            num_training_steps=num_training_steps,
+            num_warmup_steps=num_warmup_steps
         )
         
-        self.logger.info(f"Using optimizer {optimizer_type} with learning rate {self.optimizer.param_groups[0]['lr']}")
-        if self.scheduler:
-            self.logger.info(f"Using learning rate scheduler: {scheduler_type}")
+        # Initialize gradient scaler for mixed precision training if enabled
+        self.scaler = None
+        if self.training_config.use_mixed_precision and torch.cuda.is_available():
+            self.scaler = torch.cuda.amp.GradScaler()
+            self.logger.info("Using mixed precision training with gradient scaling")
+        
+        return self.optimizer, self.scheduler
     
-    def try_resume_from_checkpoint(self) -> bool:
+    def train(self) -> Dict[str, Any]:
         """
-        Try to resume training from the latest checkpoint.
+        Train the model for the specified number of epochs.
         
         Returns:
-            True if successfully resumed, False otherwise
+            Dictionary of training results
         """
-        self.logger.info("Checking for existing checkpoints to resume from")
+        # Check if model and optimizer are initialized
+        if self.model is None:
+            raise ValueError("Model not initialized. Call initialize_model first.")
+        if self.optimizer is None:
+            raise ValueError("Optimizer not initialized. Call initialize_optimizer first.")
+        if "train" not in self.dataloaders:
+            raise ValueError("Training dataloader not initialized. Call initialize_dataloaders first.")
         
-        # Find latest checkpoint
-        latest_checkpoint = self.checkpoint_manager.get_latest_checkpoint()
-        if latest_checkpoint is None:
-            self.logger.info("No checkpoints found to resume from")
-            return False
-        
-        try:
-            # Load checkpoint
-            checkpoint_info = self.checkpoint_manager.load_checkpoint(
-                self.model,
-                self.optimizer,
-                self.scheduler,
-                path=latest_checkpoint
-            )
-            
-            # Restore state
-            if "global_step" in checkpoint_info:
-                self.global_step = checkpoint_info["global_step"]
-            if "epoch" in checkpoint_info:
-                self.current_epoch = checkpoint_info["epoch"]
-            
-            self.logger.info(f"Resumed from checkpoint at epoch {self.current_epoch}, global step {self.global_step}")
-            return True
-            
-        except Exception as e:
-            self.logger.warning(f"Error resuming from checkpoint: {e}")
-            return False
-    
-    def train(self, num_epochs: Optional[int] = None) -> Dict[str, Any]:
-        """
-        Train the model for a specified number of epochs.
-        
-        Args:
-            num_epochs: Number of epochs to train (default: from training_config)
-            
-        Returns:
-            Dictionary of training statistics
-        """
-        # Set number of epochs
-        num_epochs = num_epochs or getattr(self.training_config, "max_epochs", 1)
-        
-        # Check if components are initialized
-        if self.model is None or self.tokenizer is None or self.optimizer is None:
-            self.initialize()
-        
-        # Get train dataloader
-        train_dataloader = self.dataloaders.get("train")
-        if not train_dataloader:
-            raise ValueError("No training dataloader available")
+        # Get training parameters
+        max_epochs = self.training_config.max_epochs
+        accumulation_steps = getattr(self.training_config, "accumulation_steps", 1)
         
         # Log training start
-        self.logger.info(f"Starting training for {num_epochs} epochs")
-        start_time = time.time()
+        self.logger.info(f"Starting training for {max_epochs} epochs")
+        self.logger.info(f"Accumulation steps: {accumulation_steps}")
         
-        # Initialize training state
-        start_epoch = self.current_epoch
-        
-        # Extension hooks: pre-training
-        self.extension_manager.hooks.execute_hooks("pre_epoch", self.model, start_epoch)
-        
-        # Main training loop
-        train_stats = {}
-        for epoch in range(start_epoch, start_epoch + num_epochs):
+        # Training loop
+        for epoch in range(self.current_epoch, max_epochs):
+            # Update current epoch
             self.current_epoch = epoch
             
-            # Log epoch start
-            self.logger.info(f"Starting epoch {epoch+1}/{start_epoch + num_epochs}")
-            epoch_start_time = time.time()
+            # Call extension manager pre-epoch hooks
+            if self.extension_manager is not None:
+                self.extension_manager.pre_epoch(self.model, epoch)
             
-            # Extension hooks: pre-epoch
-            self.extension_manager.pre_epoch(self.model, epoch)
+            # Train single epoch
+            epoch_metrics = self.train_epoch()
             
-            # Train for one epoch
-            epoch_stats = self.train_epoch(train_dataloader)
-            
-            # Evaluate on validation set
-            if "validation" in self.dataloaders:
-                eval_stats = self.evaluate("validation")
-                val_loss = eval_stats.get("loss", float("inf"))
+            # Evaluate if validation dataloader exists
+            val_metrics = None
+            if "val" in self.dataloaders or "validation" in self.dataloaders:
+                val_metrics = self.evaluate()
                 
-                # Log validation results
-                self.metrics_logger.log_evaluation(
-                    eval_stats,
-                    step=self.global_step,
-                    epoch=epoch,
-                    split="val"
-                )
+                # Log validation metrics
+                if self.metrics_logger is not None:
+                    self.metrics_logger.log_validation_metrics(val_metrics, epoch)
                 
-                # Check for best model
-                if val_loss < self.best_val_loss:
-                    self.best_val_loss = val_loss
-                    self.logger.info(f"New best validation loss: {val_loss:.6f}")
-                    
-                    # Save best model
-                    best_model_path = os.path.join(self.output_dir, "best_model.pt")
-                    self.save_checkpoint(best_model_path)
-                
-                # Check for early stopping if using the finetune strategy
-                if isinstance(self.training_strategy, FinetuningStrategy):
+                # Check for early stopping if using finetune strategy
+                if hasattr(self.training_strategy, "check_early_stopping"):
+                    val_loss = val_metrics.get("loss", float('inf'))
                     if self.training_strategy.check_early_stopping(val_loss):
                         self.logger.info("Early stopping triggered")
+                        self.early_stop = True
                         break
             
-            # Calculate epoch time
-            epoch_time = time.time() - epoch_start_time
-            self.logger.info(f"Epoch {epoch+1} completed in {epoch_time:.2f}s")
+            # Save checkpoint
+            if self.checkpoint_manager is not None:
+                # Check if checkpoint should be saved
+                if self.checkpoint_manager.should_save_checkpoint(epoch, self.global_step):
+                    # Get extension data if available
+                    extension_data = None
+                    if self.extension_manager is not None:
+                        extension_data = {
+                            name: extension.get_state_dict() if hasattr(extension, "get_state_dict") else None
+                            for name, extension in self.extension_manager.get_extensions().items()
+                        }
+                    
+                    # Save checkpoint
+                    checkpoint_path = self.checkpoint_manager.save_checkpoint(
+                        self.model,
+                        self.optimizer,
+                        self.scheduler,
+                        epoch=epoch,
+                        global_step=self.global_step,
+                        model_config=self.model_config,
+                        training_config=self.training_config,
+                        extension_data=extension_data,
+                        metadata={
+                            "epoch_metrics": epoch_metrics,
+                            "val_metrics": val_metrics
+                        }
+                    )
+                    
+                    # Log checkpoint
+                    self.logger.info(f"Saved checkpoint to {checkpoint_path}")
             
-            # Extension hooks: post-epoch
-            epoch_metrics = {**epoch_stats, **(eval_stats if "validation" in self.dataloaders else {})}
-            self.extension_manager.post_epoch(self.model, epoch, epoch_metrics)
+            # Call extension manager post-epoch hooks
+            if self.extension_manager is not None:
+                self.extension_manager.post_epoch(self.model, epoch, epoch_metrics)
             
-            # Store epoch stats
-            train_stats[f"epoch_{epoch+1}"] = epoch_stats
-            if "validation" in self.dataloaders:
-                train_stats[f"epoch_{epoch+1}_eval"] = eval_stats
-            
-            # Save checkpoint if configured
-            if self.checkpoint_manager.should_save_checkpoint(epoch, self.global_step):
-                checkpoint_path = self.checkpoint_manager._get_checkpoint_path(epoch, self.global_step)
-                self.save_checkpoint(checkpoint_path)
-            
-            # Log epoch metrics
-            self.metrics_logger.log_epoch(
-                {**epoch_stats, **(eval_stats if "validation" in self.dataloaders else {})},
-                epoch
-            )
+            # Check for early stopping
+            if self.early_stop:
+                self.logger.info("Early stopping")
+                break
         
-        # Calculate total training time
-        total_time = time.time() - start_time
-        self.logger.info(f"Training completed in {total_time:.2f}s")
+        # Log training end
+        self.logger.info("Training completed")
         
-        # Extension hooks: post-training
-        self.extension_manager.hooks.execute_hooks("post_epoch", self.model, self.current_epoch)
-        
-        # Save final model
-        self.save_checkpoint(os.path.join(self.output_dir, "final_model.pt"))
-        
-        # Log best metrics
-        self.metrics_logger.log_best_metrics()
-        
-        # Close metrics logger
-        self.metrics_logger.close()
-        
-        return train_stats
+        # Return training results
+        return {
+            "epochs_trained": self.current_epoch + 1,
+            "global_step": self.global_step,
+            "early_stopped": self.early_stop,
+            "best_val_loss": self.best_val_loss
+        }
     
-    def train_epoch(self, dataloader: DataLoader) -> Dict[str, Any]:
+    def train_epoch(self) -> Dict[str, Any]:
         """
-        Train for one epoch.
+        Train the model for a single epoch.
         
-        Args:
-            dataloader: Training dataloader
-            
         Returns:
-            Dictionary of epoch statistics
+            Dictionary of epoch metrics
         """
         # Set model to training mode
         self.model.train()
         
-        # Initialize epoch statistics
-        epoch_stats = {
+        # Get training dataloader
+        train_dataloader = self.dataloaders["train"]
+        
+        # Initialize metrics
+        epoch_metrics = {
             "train_loss": 0.0,
-            "steps": 0,
-            "examples": 0,
-            "grad_norm": 0.0
+            "steps": 0
         }
         
+        # Start timing
+        start_time = time.time()
+        
+        # Get accumulation steps
+        accumulation_steps = getattr(self.training_config, "accumulation_steps", 1)
+        
         # Training loop
-        num_batches = len(dataloader)
-        for batch_idx, batch in enumerate(dataloader):
-            # Extension hooks: pre-batch
-            self.extension_manager.pre_batch(self.model, batch)
+        for step, batch in enumerate(train_dataloader):
+            # Call extension manager pre-batch hooks
+            if self.extension_manager is not None:
+                self.extension_manager.pre_batch(self.model, batch)
             
-            # Prepare batch with model adapter
-            prepared_batch = self.model_adapter.prepare_batch(batch)
+            # Check if this is an update step
+            is_update_step = (step + 1) % accumulation_steps == 0 or step == len(train_dataloader) - 1
             
-            # Determine if gradients should be updated (for gradient accumulation)
-            accumulation_steps = getattr(self.training_config, "accumulation_steps", 1)
-            update_gradients = (batch_idx + 1) % accumulation_steps == 0 or batch_idx == num_batches - 1
-            
-            # Train step with strategy
+            # Train step
             step_metrics = self.training_strategy.train_step(
                 self.model,
-                prepared_batch,
+                batch,
                 self.optimizer,
                 self.scaler,
                 self.scheduler,
-                update_gradients
+                update_gradients=is_update_step
             )
             
-            # Update statistics
-            epoch_stats["train_loss"] += step_metrics.get("loss", 0.0)
-            epoch_stats["steps"] += 1
-            epoch_stats["examples"] += prepared_batch.get("input_ids", prepared_batch.get("inputs", [])).shape[0]
+            # Update metrics
+            epoch_metrics["train_loss"] += step_metrics.get("loss", 0.0)
+            epoch_metrics["steps"] += 1
             
             # Update global step if gradients were updated
-            if update_gradients:
+            if is_update_step:
                 self.global_step += 1
-                
-                # Extension hooks: post-batch
+            
+            # Call extension manager post-batch hooks
+            if self.extension_manager is not None:
                 self.extension_manager.post_batch(
-                    self.model, 
-                    prepared_batch, 
-                    step_metrics.get("loss", 0.0), 
+                    self.model,
+                    batch,
+                    step_metrics.get("loss", 0.0),
                     self.global_step
                 )
-                
-                # Log step metrics
-                self.metrics_logger.log_training_step(
-                    step_metrics,
-                    step=self.global_step,
-                    epoch=self.current_epoch
-                )
-                
-                # Accumulate grad norm
-                if "grad_norm" in step_metrics:
-                    epoch_stats["grad_norm"] += step_metrics["grad_norm"]
             
-            # Log progress periodically
-            if batch_idx % max(1, num_batches // 10) == 0:
-                completion = (batch_idx + 1) / num_batches
-                self.logger.info(
-                    f"Epoch {self.current_epoch+1} progress: {completion:.1%} "
-                    f"({batch_idx+1}/{num_batches}), "
-                    f"loss: {step_metrics.get('loss', 0.0):.6f}"
+            # Log metrics
+            if self.metrics_logger is not None and is_update_step:
+                self.metrics_logger.log_training_step(step_metrics, self.global_step)
+            
+            # Log progress
+            if step % 10 == 0:
+                self.logger.debug(
+                    f"Epoch {self.current_epoch+1} | Step {step}/{len(train_dataloader)} | "
+                    f"Loss: {step_metrics.get('loss', 0.0):.4f} | "
+                    f"LR: {self.training_strategy.get_learning_rate(self.optimizer):.2e}"
                 )
         
-        # Compute average metrics
-        if epoch_stats["steps"] > 0:
-            epoch_stats["train_loss"] /= epoch_stats["steps"]
-            epoch_stats["grad_norm"] /= max(1, epoch_stats["steps"] // accumulation_steps)
+        # Calculate average loss
+        epoch_metrics["train_loss"] /= max(epoch_metrics["steps"], 1)
         
-        return epoch_stats
+        # Calculate epoch time
+        epoch_time = time.time() - start_time
+        epoch_metrics["epoch_time"] = epoch_time
+        
+        # Log epoch metrics
+        self.logger.info(
+            f"Epoch {self.current_epoch+1} completed in {epoch_time:.1f}s | "
+            f"Loss: {epoch_metrics['train_loss']:.4f} | "
+            f"Steps: {epoch_metrics['steps']}"
+        )
+        
+        # Log metrics
+        if self.metrics_logger is not None:
+            self.metrics_logger.log_epoch_metrics(epoch_metrics, self.current_epoch)
+        
+        return epoch_metrics
     
-    def evaluate(self, split: str = "validation") -> Dict[str, Any]:
+    def evaluate(self, dataloader_name: str = "val") -> Dict[str, Any]:
         """
-        Evaluate the model on a specific dataset split.
+        Evaluate the model on a dataset.
         
         Args:
-            split: Dataset split to evaluate on
+            dataloader_name: Name of the dataloader to use for evaluation
             
         Returns:
             Dictionary of evaluation metrics
         """
-        # Get dataloader for the specified split
-        dataloader = self.dataloaders.get(split)
-        if not dataloader:
-            self.logger.warning(f"No dataloader available for split: {split}")
-            return {}
+        # Check if model is initialized
+        if self.model is None:
+            raise ValueError("Model not initialized. Call initialize_model first.")
         
-        # Extension hooks: pre-validation
-        self.extension_manager.pre_validation(self.model)
+        # Handle alternative dataloader name
+        if dataloader_name not in self.dataloaders and dataloader_name == "val":
+            dataloader_name = "validation"
         
-        # Validate with strategy
-        validation_metrics = self.training_strategy.validate(
+        # Check if evaluation dataloader exists
+        if dataloader_name not in self.dataloaders:
+            raise ValueError(f"Dataloader '{dataloader_name}' not found.")
+        
+        # Get evaluation dataloader
+        eval_dataloader = self.dataloaders[dataloader_name]
+        
+        # Call extension manager pre-validation hooks
+        if self.extension_manager is not None:
+            self.extension_manager.pre_validation(self.model)
+        
+        # Get device
+        device = next(self.model.parameters()).device
+        
+        # Start timing
+        start_time = time.time()
+        
+        # Evaluate model
+        val_metrics = self.training_strategy.validate(
             self.model,
-            dataloader,
-            self.device
+            eval_dataloader,
+            device
         )
         
-        # Extension hooks: post-validation
-        self.extension_manager.post_validation(self.model, validation_metrics)
+        # Calculate evaluation time
+        eval_time = time.time() - start_time
+        val_metrics["eval_time"] = eval_time
         
-        return validation_metrics
+        # Update best validation loss
+        if val_metrics.get("loss", float('inf')) < self.best_val_loss:
+            self.best_val_loss = val_metrics.get("loss", float('inf'))
+            val_metrics["is_best"] = True
+        
+        # Log validation metrics
+        self.logger.info(
+            f"Validation completed in {eval_time:.1f}s | "
+            f"Loss: {val_metrics.get('loss', 'N/A'):.4f} | "
+            f"Perplexity: {val_metrics.get('perplexity', 'N/A'):.4f}"
+        )
+        
+        # Call extension manager post-validation hooks
+        if self.extension_manager is not None:
+            self.extension_manager.post_validation(self.model, val_metrics)
+        
+        return val_metrics
     
-    def save_checkpoint(
-        self,
-        path: Optional[str] = None,
-        include_optimizer: bool = True
-    ) -> str:
+    def save_checkpoint(self, path: Optional[str] = None) -> str:
         """
-        Save a model checkpoint.
+        Save a checkpoint of the model and training state.
         
         Args:
-            path: Path to save checkpoint (if None, generates a path)
-            include_optimizer: Whether to include optimizer state
+            path: Path to save checkpoint (if None, generates path)
             
         Returns:
             Path to the saved checkpoint
         """
-        # Collect extension data
-        extension_data = {}
-        for name, extension in self.extension_manager.get_extensions().items():
-            if hasattr(extension, "get_state_dict") and callable(extension.get_state_dict):
-                try:
-                    extension_data[name] = extension.get_state_dict()
-                except Exception as e:
-                    self.logger.warning(f"Error getting state from extension {name}: {e}")
+        # Generate checkpoint path if not provided
+        if path is None and self.checkpoint_manager is not None:
+            path = self.checkpoint_manager._get_checkpoint_path(self.current_epoch, self.global_step)
+        elif path is None:
+            # Fallback if checkpoint manager not available
+            os.makedirs(os.path.join(self.output_dir, "checkpoints"), exist_ok=True)
+            path = os.path.join(
+                self.output_dir, 
+                "checkpoints", 
+                f"checkpoint_epoch_{self.current_epoch+1}_step_{self.global_step}.pt"
+            )
         
-        # Collect additional metadata
-        metadata = {
-            "global_step": self.global_step,
-            "version": "1.0.0",  # Version of checkpoint format
-            "extension_names": self.extension_manager.get_extension_names()
-        }
+        # Get extension data if available
+        extension_data = None
+        if self.extension_manager is not None:
+            extension_data = {
+                name: extension.get_state_dict() if hasattr(extension, "get_state_dict") else None
+                for name, extension in self.extension_manager.get_extensions().items()
+            }
         
-        # Save checkpoint with checkpoint manager
-        return self.checkpoint_manager.save_checkpoint(
-            self.model,
-            self.optimizer if include_optimizer else None,
-            self.scheduler if include_optimizer else None,
-            epoch=self.current_epoch,
-            global_step=self.global_step,
-            model_config=self.model_config,
-            training_config=self.training_config,
-            extension_data=extension_data,
-            metadata=metadata,
-            path=path
-        )
+        # Save checkpoint
+        if self.checkpoint_manager is not None:
+            checkpoint_path = self.checkpoint_manager.save_checkpoint(
+                self.model,
+                self.optimizer,
+                self.scheduler,
+                epoch=self.current_epoch,
+                global_step=self.global_step,
+                model_config=self.model_config,
+                training_config=self.training_config,
+                extension_data=extension_data,
+                path=path
+            )
+        else:
+            # Fallback if checkpoint manager not available
+            checkpoint = {
+                "model_state_dict": self.model.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict() if self.optimizer else None,
+                "scheduler_state_dict": self.scheduler.state_dict() if self.scheduler else None,
+                "epoch": self.current_epoch,
+                "global_step": self.global_step,
+                "extension_data": extension_data
+            }
+            
+            torch.save(checkpoint, path)
+            checkpoint_path = path
+        
+        self.logger.info(f"Saved checkpoint to {checkpoint_path}")
+        return checkpoint_path
     
-    def load_model_for_inference(self, path: str) -> nn.Module:
+    def load_checkpoint(self, path: str) -> Dict[str, Any]:
         """
-        Load a model for inference.
+        Load a checkpoint.
         
         Args:
-            path: Path to model checkpoint
+            path: Path to checkpoint
             
         Returns:
-            Loaded model
+            Dictionary with checkpoint info
         """
-        # Initialize model if needed
+        # Check if model and optimizer are initialized
         if self.model is None:
-            self.initialize_model_and_tokenizer()
+            raise ValueError("Model not initialized. Call initialize_model first.")
         
         # Load checkpoint
-        self.checkpoint_manager.load_checkpoint(
-            self.model,
-            path=path,
-            load_optimizer=False,
-            load_scheduler=False
-        )
+        if self.checkpoint_manager is not None:
+            checkpoint_info = self.checkpoint_manager.load_checkpoint(
+                self.model,
+                self.optimizer,
+                self.scheduler,
+                path=path
+            )
+        else:
+            # Fallback if checkpoint manager not available
+            if not os.path.isfile(path):
+                raise FileNotFoundError(f"Checkpoint file not found: {path}")
+            
+            checkpoint = torch.load(path, map_location=next(self.model.parameters()).device)
+            
+            # Load model state
+            self.model.load_state_dict(checkpoint["model_state_dict"])
+            
+            # Load optimizer state if available
+            if self.optimizer is not None and "optimizer_state_dict" in checkpoint:
+                self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            
+            # Load scheduler state if available
+            if self.scheduler is not None and "scheduler_state_dict" in checkpoint:
+                self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            
+            # Update training state
+            self.current_epoch = checkpoint.get("epoch", 0)
+            self.global_step = checkpoint.get("global_step", 0)
+            
+            # Create checkpoint info
+            checkpoint_info = {
+                "path": path,
+                "epoch": self.current_epoch,
+                "global_step": self.global_step,
+                "extension_data": checkpoint.get("extension_data", None)
+            }
         
-        # Set model to evaluation mode
-        self.model.eval()
+        # Update training state
+        self.current_epoch = checkpoint_info.get("epoch", 0)
+        self.global_step = checkpoint_info.get("global_step", 0)
         
-        return self.model
+        # Load extension data if available
+        if self.extension_manager is not None and "extension_data" in checkpoint_info:
+            extension_data = checkpoint_info["extension_data"]
+            if extension_data:
+                for name, state_dict in extension_data.items():
+                    if name in self.extension_manager.get_extensions():
+                        extension = self.extension_manager.get_extension(name)
+                        if hasattr(extension, "load_state_dict") and state_dict is not None:
+                            extension.load_state_dict(state_dict)
+        
+        self.logger.info(f"Loaded checkpoint from {path}")
+        self.logger.info(f"Resuming from epoch {self.current_epoch+1}, step {self.global_step}")
+        
+        return checkpoint_info
     
-    def get_model_and_tokenizer(self) -> Tuple[nn.Module, Any]:
+    def set_model_adapter(self, model_adapter: ModelAdapter) -> None:
         """
-        Get the model and tokenizer.
+        Set the model adapter.
         
-        Returns:
-            Tuple of (model, tokenizer)
+        Args:
+            model_adapter: Model adapter instance
         """
-        if self.model is None or self.tokenizer is None:
-            self.initialize_model_and_tokenizer()
+        self.model_adapter = model_adapter
+    
+    def set_training_strategy(self, training_strategy: TrainingStrategy) -> None:
+        """
+        Set the training strategy.
         
-        return self.model, self.tokenizer
+        Args:
+            training_strategy: Training strategy instance
+        """
+        self.training_strategy = training_strategy
+    
+    def set_extension_manager(self, extension_manager: ExtensionManager) -> None:
+        """
+        Set the extension manager.
+        
+        Args:
+            extension_manager: Extension manager instance
+        """
+        self.extension_manager = extension_manager
+    
+    def set_checkpoint_manager(self, checkpoint_manager: Any) -> None:
+        """
+        Set the checkpoint manager.
+        
+        Args:
+            checkpoint_manager: Checkpoint manager instance
+        """
+        self.checkpoint_manager = checkpoint_manager
+    
+    def set_metrics_logger(self, metrics_logger: Any) -> None:
+        """
+        Set the metrics logger.
+        
+        Args:
+            metrics_logger: Metrics logger instance
+        """
+        self.metrics_logger = metrics_logger
+    
+    def _save_config(self) -> None:
+        """Save configuration to output directory."""
+        # Create output directory if it doesn't exist
+        os.makedirs(self.output_dir, exist_ok=True)
+        
+        # Save config if possible
+        config_path = os.path.join(self.output_dir, "config.json")
+        try:
+            from src.config.config_manager import ConfigManager
+            config_manager = ConfigManager()
+            
+            # Convert config objects to dict
+            config_dict = {
+                "model": config_manager.model_config_to_dict(self.model_config),
+                "training": config_manager.training_config_to_dict(self.training_config),
+                "data": config_manager.data_config_to_dict(self.data_config)
+            }
+            
+            # Save config
+            config_manager.save_config(config_dict, config_path)
+            self.logger.info(f"Saved configuration to {config_path}")
+        except Exception as e:
+            self.logger.warning(f"Failed to save configuration: {e}")
