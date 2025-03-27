@@ -177,13 +177,38 @@ class DialogueTrainer(BaseTrainer):
                 # Handle tensor datasets differently
                 batch = tuple(t.to(self.device) for t in batch)
                 
-                # Create input dict for model
-                input_ids, attention_mask, labels = batch
-                batch = {
-                    "input_ids": input_ids,
-                    "attention_mask": attention_mask,
-                    "labels": labels
-                }
+                # Create input dict for model - with error handling
+                try:
+                    if len(batch) >= 3:
+                        input_ids, attention_mask, labels = batch[:3]
+                        batch = {
+                            "input_ids": input_ids,
+                            "attention_mask": attention_mask,
+                            "labels": labels
+                        }
+                    elif len(batch) == 2:
+                        # Only input_ids and attention_mask available
+                        input_ids, attention_mask = batch
+                        batch = {
+                            "input_ids": input_ids,
+                            "attention_mask": attention_mask
+                        }
+                    else:
+                        self.logger.warning(f"Unexpected batch format with {len(batch)} elements. Skipping.")
+                        continue
+                except Exception as e:
+                    self.logger.warning(f"Error unpacking batch: {e}. Skipping.")
+                    continue
+            
+            # Ensure required keys are present
+            if "input_ids" not in batch or "attention_mask" not in batch:
+                self.logger.warning("Batch is missing required keys. Skipping.")
+                continue
+                
+            # If no labels are present, add dummy labels using input_ids
+            if "labels" not in batch:
+                self.logger.warning("No labels found in batch. Using input_ids as labels for language modeling.")
+                batch["labels"] = batch["input_ids"].clone()
             
             # NaN prevention: Check if all labels are -100
             if (batch["labels"] == -100).all():

@@ -74,7 +74,8 @@ def get_daily_dialog_dataloaders(
         try:
             # Use executor with timeout to prevent hanging
             with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(load_dataset, "daily_dialog", cache_dir=cache_dir)
+                # Add trust_remote_code=True to handle custom code in the dataset
+                future = executor.submit(load_dataset, "daily_dialog", cache_dir=cache_dir, trust_remote_code=True)
                 try:
                     daily_dialog = future.result(timeout=timeout)
                     logger.info("Daily Dialog dataset downloaded successfully")
