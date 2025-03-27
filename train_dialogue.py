@@ -24,6 +24,7 @@ from src.data.dialogue_dataset import get_dialogue_dataloaders
 from src.data.function_calling_dataset import get_function_calling_dataloaders, get_default_function_definitions
 from src.training.trainer import Trainer
 from src.training.continuous_learning import ContinuousLearningManager, ContinuousLearningConfig
+from src.training.checkpoint import find_latest_checkpoint
 from src.utils.device import get_device
 from src.utils.logging import setup_logger
 
@@ -116,10 +117,12 @@ def parse_args():
                         help="Number of workers for data loading")
     
     # Resuming training
-    parser.add_argument("--resume_from", type=str, default=None, 
+    parser.add_argument("--resume_from", type=str, default=None,
                         help="Path to checkpoint to resume training from")
     parser.add_argument("--resume_continuous_learning", action="store_true",
                         help="Resume continuous learning state if resuming from checkpoint")
+    parser.add_argument("--auto_resume", action="store_true",
+                        help="Automatically resume from latest checkpoint if available")
     
     return parser.parse_args()
 
@@ -314,8 +317,32 @@ def main():
     # Create output directory with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = args.output_dir
+    
+    # Check if we should auto-resume from any existing run in the base directory
+    if args.auto_resume and not args.resume_from:
+        # Look for existing runs in the base output directory
+        runs = [d for d in os.listdir(args.output_dir)
+                if os.path.isdir(os.path.join(args.output_dir, d)) and d.startswith("dialogue_model_")]
+        
+        if runs:
+            # Sort runs by creation time (newest first)
+            runs.sort(reverse=True)
+            latest_run = os.path.join(args.output_dir, runs[0])
+            
+            # Check if this run has any checkpoints
+            checkpoint_dir = os.path.join(latest_run, "checkpoints")
+            if os.path.exists(checkpoint_dir):
+                latest_checkpoint = find_latest_checkpoint(checkpoint_dir)
+                if latest_checkpoint:
+                    logger.info(f"Auto-resuming from latest run: {latest_run}")
+                    logger.info(f"Latest checkpoint: {latest_checkpoint}")
+                    output_dir = latest_run
+                    args.resume_from = latest_checkpoint
+    
+    # Only create a new directory with timestamp if not resuming
     if not args.resume_from:
         output_dir = os.path.join(args.output_dir, f"dialogue_model_{timestamp}")
+    
     os.makedirs(output_dir, exist_ok=True)
     
     # Set up logger
@@ -454,6 +481,19 @@ def main():
             config=cl_config,
             output_dir=os.path.join(output_dir, "continuous_learning")
         )
+    
+    # Auto-resume from latest checkpoint if requested
+    if args.auto_resume and not args.resume_from:
+        checkpoint_dir = os.path.join(output_dir, "checkpoints")
+        if os.path.exists(checkpoint_dir):
+            latest_checkpoint = find_latest_checkpoint(checkpoint_dir)
+            if latest_checkpoint:
+                logger.info(f"Auto-resuming from latest checkpoint: {latest_checkpoint}")
+                args.resume_from = latest_checkpoint
+            else:
+                logger.info("No checkpoints found for auto-resume. Starting fresh training.")
+        else:
+            logger.info("No checkpoints directory found for auto-resume. Starting fresh training.")
     
     # Resume from checkpoint if specified
     if args.resume_from:

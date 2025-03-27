@@ -1,71 +1,103 @@
 """
-Tensor collation utilities for ensuring all batch data is properly converted to tensors.
+Tensor collate functions for batching data.
+
+This module provides collate functions for batching data from different datasets,
+including dialogue datasets, which have specialized tensor formats.
 """
 
 import torch
-import logging
-from typing import Dict, List, Any, Union
-
-# Get logger
-logger = logging.getLogger("quantum_resonance")
+from typing import Dict, List, Any, Union, Tuple
 
 
-def tensor_collate_fn(batch):
+def dialogue_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
     """
-    Custom collate function to ensure proper tensor conversion.
+    Collate function for dialogue batches.
     
     Args:
-        batch: Batch of data from the dataset
+        batch: List of tokenized dialogues
         
     Returns:
-        Dict[str, torch.Tensor]: Batch with all values converted to tensors
+        Batched tensors
     """
+    # Check for empty batch
     if not batch:
         return {}
     
+    # Get keys from the first element
+    keys = batch[0].keys()
+    
+    # Initialize result dictionary
     result = {}
     
-    # Process each feature
-    for key in batch[0].keys():
-        # Extract values for this key from all items
-        values = [item[key] for item in batch]
+    # Stack tensors for each key
+    for key in keys:
+        # Collect tensors for this key
+        tensors = [item[key] for item in batch]
         
-        # Check if values are already tensors
-        if isinstance(values[0], torch.Tensor):
-            # Stack tensors
-            try:
-                result[key] = torch.stack(values)
-            except RuntimeError as e:
-                logger.warning(f"Could not stack tensors for {key}: {e}")
-                # Fallback to just returning the list of tensors
-                result[key] = values
+        # Stack tensors into a batch
+        if all(isinstance(t, torch.Tensor) for t in tensors):
+            result[key] = torch.stack(tensors)
         else:
-            # Convert lists to tensors
-            try:
-                result[key] = torch.tensor(values)
-            except (ValueError, TypeError) as e:
-                logger.warning(f"Could not convert {key} to tensor: {e}")
-                # If conversion fails, keep as list but log a warning
-                result[key] = values
+            # Handle non-tensor data (e.g., lists, scalars)
+            result[key] = tensors
     
     return result
 
 
-def debug_batch_structure(batch, name="Batch"):
+def default_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Debug helper to print batch structure and tensor types.
+    Default collate function for general data batches.
     
     Args:
-        batch: Batch data to debug
-        name: Name to use in log messages
+        batch: List of data items with dictionary structure
+        
+    Returns:
+        Batched data
     """
-    logger.debug(f"{name} structure:")
-    for k, v in batch.items():
-        if isinstance(v, torch.Tensor):
-            logger.debug(f"  {k}: tensor, shape={v.shape}, dtype={v.dtype}")
-        elif isinstance(v, list):
-            list_type = type(v[0]).__name__ if v else "empty"
-            list_len = len(v)
-            logger.debug(f"  {k}: list of {list_type}, len={list_len}")
+    # Check for empty batch
+    if not batch:
+        return {}
+    
+    # Get keys from the first element
+    keys = batch[0].keys()
+    
+    # Initialize result dictionary
+    result = {}
+    
+    # Process each key
+    for key in keys:
+        # Collect values for this key
+        values = [item[key] for item in batch]
+        
+        # Handle different types
+        if all(isinstance(v, torch.Tensor) for v in values):
+            # Stack tensors
+            result[key] = torch.stack(values)
+        elif all(isinstance(v, (int, float)) for v in values):
+            # Convert numbers to tensor
+            result[key] = torch.tensor(values)
         else:
-            logger.debug(f"  {k}: {type(v).__name__}")
+            # Keep as list for other types
+            result[key] = values
+    
+    return result
+
+
+def tensor_collate_fn(batch: List[Tuple[torch.Tensor, torch.Tensor]]) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Collate function for simple tensor pairs (e.g., input and target tensors).
+    
+    Args:
+        batch: List of (input, target) tensor pairs
+        
+    Returns:
+        Tuple of batched input and target tensors
+    """
+    # Split batch into inputs and targets
+    inputs, targets = zip(*batch)
+    
+    # Stack inputs and targets
+    inputs_batch = torch.stack(inputs)
+    targets_batch = torch.stack(targets)
+    
+    return inputs_batch, targets_batch

@@ -1,492 +1,446 @@
 """
-Dialogue Dataset processing module.
+Dialogue dataset for the Quantum Resonance Language Model.
 
-This module provides utilities for loading, preprocessing, and training on
-dialogue datasets for conversation-based language modeling.
+This module provides a dataset for dialogue data, supporting
+conversational training with multiple speakers.
 """
 
 import os
 import json
 import torch
-import random
-from typing import Dict, List, Optional, Union, Any, Tuple
-from torch.utils.data import Dataset, DataLoader
-from datasets import load_dataset
+import logging
+import time
+from typing import Dict, List, Any, Optional, Union, Tuple, Set
+from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer
+from tqdm import tqdm
 
+# Set up logging
+logger = logging.getLogger("dialogue_dataset")
 
 class DialogueDataset(Dataset):
     """
-    Dataset class for dialogue and conversation data.
+    Dataset for dialogue data.
     
-    This class handles various dialogue formats, including:
-    - Standard dialogue datasets (DailyDialog, ConvAI2, etc.)
-    - Custom conversation data
-    - User feedback and interactions
+    This dataset is designed for conversational data with multiple turns.
+    It supports various dialogue formats and includes special tokens for
+    different speakers.
     """
     
-    def __init__(self, 
-                 tokenizer: PreTrainedTokenizer,
-                 data_path: Optional[str] = None,
-                 dataset_name: Optional[str] = None,
-                 split: str = "train",
-                 max_length: int = 1024,
-                 speaker_tokens: Optional[Dict[str, str]] = None,
-                 system_prompt: Optional[str] = None,
-                 cache_dir: Optional[str] = None,
-                 return_tensors: bool = True,
-                 include_history: bool = True,
-                 history_length: int = 5,
-                 learning_samples: Optional[List[Dict]] = None):
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizer,
+        data_path: Optional[str] = None,
+        dialogues: Optional[List[List[Dict[str, str]]]] = None,
+        max_length: int = 512,
+        system_prompt: Optional[str] = None,
+        role_mapping: Optional[Dict[str, str]] = None,
+        add_eos_token: bool = True,
+        add_special_tokens: bool = True,
+        processing_batch_size: int = 8,  # Reduced batch size
+        assistant_token_id: Optional[int] = None,  # Pre-computed assistant token ID
+        role_token_ids: Optional[Set[int]] = None  # Pre-computed role token IDs
+    ):
         """
-        Initialize the DialogueDataset.
+        Initialize the dialogue dataset.
         
         Args:
-            tokenizer: Tokenizer to use for preprocessing
-            data_path: Path to custom dialogue data (JSON format)
-            dataset_name: Name of the HF dataset to load (e.g., "daily_dialog")
-            split: Dataset split (train, validation, test)
+            tokenizer: Tokenizer to use for encoding texts
+            data_path: Path to the dialogue data file (JSON)
+            dialogues: Pre-loaded dialogues (if data_path is not provided)
             max_length: Maximum sequence length
-            speaker_tokens: Dictionary mapping speaker roles to tokens
-            system_prompt: Optional system prompt to include at the start of conversations
-            cache_dir: Directory for caching the dataset
-            return_tensors: Whether to return PyTorch tensors
-            include_history: Whether to include conversation history
-            history_length: Maximum number of turns to include in history
-            learning_samples: Optional additional samples for continuous learning
+            system_prompt: Optional system prompt to add at start of dialogues
+            role_mapping: Mapping of role names to special tokens
+            add_eos_token: Whether to add EOS token after each message
+            add_special_tokens: Whether to add role tokens
+            processing_batch_size: Batch size for dialogue processing
+            assistant_token_id: Pre-computed assistant token ID for optimization
+            role_token_ids: Pre-computed set of role token IDs for optimization
         """
         self.tokenizer = tokenizer
+        self.data_path = data_path
         self.max_length = max_length
-        self.return_tensors = return_tensors
-        self.include_history = include_history
-        self.history_length = history_length
+        self.system_prompt = system_prompt or ""
+        self.add_eos_token = add_eos_token
+        self.add_special_tokens = add_special_tokens
+        self.processing_batch_size = processing_batch_size
         
-        # Set up speaker tokens
-        self.speaker_tokens = speaker_tokens or {
-            "system": "<|system|>",
-            "user": "<|user|>",
-            "assistant": "<|assistant|>",
-            "end": "<|end|>"
+        logger.info(f"Creating DialogueDataset (max_length={max_length}, batch_size={processing_batch_size})")
+        
+        # Default role mapping if not provided
+        self.role_mapping = role_mapping or {
+            "system": "<system>",
+            "user": "<user>",
+            "assistant": "<assistant>",
+            "human": "<user>",
+            "bot": "<assistant>"
         }
         
-        # Add special tokens to tokenizer if they don't exist
-        self._add_special_tokens()
+        # Pre-compute token IDs for roles if not provided
+        self._pre_compute_token_ids(assistant_token_id, role_token_ids)
         
-        # Set system prompt
-        self.system_prompt = system_prompt
+        # Performance tracking
+        total_start = time.time()
         
-        # Load the dataset
-        self.conversations = []
-        
-        if data_path and os.path.exists(data_path):
-            # Load custom data from file
-            self._load_custom_data(data_path)
-        elif dataset_name:
-            # Load from Hugging Face datasets
-            self._load_hf_dataset(dataset_name, split, cache_dir)
-        
-        # Add learning samples if provided
-        if learning_samples:
-            self.conversations.extend(learning_samples)
-        
-        # Prepare examples
-        self.examples = self._prepare_examples()
-    
-    def _add_special_tokens(self):
-        """Add special tokens to the tokenizer if they don't exist."""
-        special_tokens = list(self.speaker_tokens.values())
-        
-        # Check if we need to add these tokens
-        tokens_to_add = []
-        for token in special_tokens:
-            if token not in self.tokenizer.get_vocab():
-                tokens_to_add.append(token)
-        
-        if tokens_to_add:
-            special_tokens_dict = {"additional_special_tokens": tokens_to_add}
-            self.tokenizer.add_special_tokens(special_tokens_dict)
-    
-    def _load_custom_data(self, data_path: str):
-        """Load custom dialogue data from file."""
-        if data_path.endswith('.json'):
-            with open(data_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                
-                # Handle different JSON formats
-                if isinstance(data, list):
-                    if data and isinstance(data[0], dict):
-                        if "conversations" in data[0]:
-                            # ShareGPT format
-                            for item in data:
-                                self.conversations.append(item["conversations"])
-                        else:
-                            # List of direct conversations
-                            self.conversations.extend(data)
-                elif isinstance(data, dict) and "conversations" in data:
-                    # Dataset with a conversations field
-                    self.conversations.extend(data["conversations"])
+        # Load dialogue data - either from provided dialogues or from file
+        if dialogues is not None:
+            logger.info(f"Using {len(dialogues)} pre-loaded dialogues")
+            self.dialogues = dialogues
         else:
-            # Handle other file formats here
-            raise ValueError(f"Unsupported file format for {data_path}")
-    
-    def _load_hf_dataset(self, dataset_name: str, split: str, cache_dir: Optional[str] = None):
-        """Load dataset from Hugging Face datasets."""
-        # Map common dataset names to proper identifiers
-        dataset_mapping = {
-            "daily_dialog": ("daily_dialog", self._process_daily_dialog),
-            "convai2": ("conv_ai_2", self._process_convai),
-            "empathetic_dialogues": ("empathetic_dialogues", self._process_empathetic)
-        }
-        
-        if dataset_name in dataset_mapping:
-            hf_name, processor = dataset_mapping[dataset_name]
-            data = load_dataset(hf_name, split=split, cache_dir=cache_dir)
-            self.conversations = processor(data)
-        else:
-            # Try to load directly and use default processing
-            try:
-                data = load_dataset(dataset_name, split=split, cache_dir=cache_dir)
-                if "dialog" in data.column_names:
-                    self.conversations = self._process_general_dialog(data)
-                else:
-                    raise ValueError(f"Unsupported dataset format for {dataset_name}")
-            except Exception as e:
-                raise ValueError(f"Failed to load dataset {dataset_name}: {str(e)}")
-    
-    def _process_daily_dialog(self, data):
-        """Process the DailyDialog dataset format."""
-        conversations = []
-        for item in data:
-            dialog = []
-            for i, utterance in enumerate(item["dialog"]):
-                # Alternating between user and assistant
-                speaker = "user" if i % 2 == 0 else "assistant"
-                dialog.append({"role": speaker, "content": utterance})
-            conversations.append(dialog)
-        return conversations
-    
-    def _process_convai(self, data):
-        """Process the ConvAI2 dataset format."""
-        conversations = []
-        for item in data:
-            dialog = []
-            for i, utterance in enumerate(item["dialog"]):
-                role = "user" if utterance["id"] % 2 == 0 else "assistant"
-                dialog.append({"role": role, "content": utterance["text"]})
-            conversations.append(dialog)
-        return conversations
-    
-    def _process_empathetic(self, data):
-        """Process the Empathetic Dialogues dataset format."""
-        conversations = []
-        current_conv = []
-        current_conv_id = None
-        
-        # Sort by conversation ID and turn ID
-        sorted_data = sorted(data, key=lambda x: (x["conv_id"], x["utterance_idx"]))
-        
-        for item in sorted_data:
-            if current_conv_id is None:
-                current_conv_id = item["conv_id"]
+            logger.info(f"Loading dialogues from file: {data_path}")
+            self.dialogues = self._load_dialogues()
             
-            if item["conv_id"] != current_conv_id:
-                if current_conv:
-                    conversations.append(current_conv)
-                current_conv = []
-                current_conv_id = item["conv_id"]
-            
-            role = "user" if item["speaker_idx"] % 2 == 0 else "assistant"
-            current_conv.append({"role": role, "content": item["utterance"]})
+        logger.info(f"Loaded {len(self.dialogues)} dialogues")
         
-        if current_conv:
-            conversations.append(current_conv)
-            
-        return conversations
-    
-    def _process_general_dialog(self, data):
-        """Process a general dialogue dataset with a 'dialog' field."""
-        conversations = []
-        for item in data:
-            if "dialog" in item:
-                dialog = []
-                for i, utterance in enumerate(item["dialog"]):
-                    if isinstance(utterance, dict) and "text" in utterance:
-                        speaker = utterance.get("speaker", "user" if i % 2 == 0 else "assistant")
-                        dialog.append({"role": speaker, "content": utterance["text"]})
-                    elif isinstance(utterance, str):
-                        speaker = "user" if i % 2 == 0 else "assistant"
-                        dialog.append({"role": speaker, "content": utterance})
-                conversations.append(dialog)
-        return conversations
-    
-    def _prepare_examples(self):
-        """Prepare examples for training by formatting and tokenizing the conversations."""
-        examples = []
+        # Prepare tokenized dialogues with progress bar
+        self.tokenized_dialogues = self._prepare_dialogues()
         
-        for conversation in self.conversations:
-            # Skip empty conversations
-            if not conversation:
-                continue
-            
-            # Add system prompt if provided
-            formatted_text = ""
-            if self.system_prompt:
-                formatted_text = f"{self.speaker_tokens['system']} {self.system_prompt} {self.speaker_tokens['end']}\n"
-            
-            # Process conversation turns
-            history = []
-            for i, turn in enumerate(conversation):
-                role = turn.get("role", "user" if i % 2 == 0 else "assistant")
-                content = turn.get("content", "").strip()
-                
-                if not content:
-                    continue
-                
-                turn_text = f"{self.speaker_tokens.get(role, role)} {content} {self.speaker_tokens['end']}\n"
-                
-                # For each turn, create an example with appropriate history
-                if role == "assistant":
-                    if self.include_history:
-                        # Include conversation history up to this point
-                        context = formatted_text + "".join(history[-self.history_length*2:])
-                        full_text = context + turn_text
-                    else:
-                        # Only include the immediate user query and assistant response
-                        if history:
-                            full_text = formatted_text + history[-1] + turn_text
-                        else:
-                            full_text = formatted_text + turn_text
-                    
-                    # Tokenize the text
-                    tokenized = self.tokenizer(full_text, truncation=True, max_length=self.max_length)
-                    
-                    # Find where the assistant response starts to create labels
-                    assistant_token = self.speaker_tokens["assistant"]
-                    assistant_token_ids = self.tokenizer.encode(assistant_token, add_special_tokens=False)
-                    
-                    # Find the last occurrence of the assistant token
-                    input_ids = tokenized["input_ids"]
-                    attention_mask = tokenized["attention_mask"]
-                    
-                    # First token of the last assistant turn
-                    for i in range(len(input_ids) - len(assistant_token_ids)):
-                        if input_ids[i:i+len(assistant_token_ids)] == assistant_token_ids:
-                            assistant_start = i
-                    
-                    # Create labels: -100 for non-assistant tokens (ignored in loss)
-                    labels = [-100] * len(input_ids)
-                    labels[assistant_start:] = input_ids[assistant_start:]
-                    
-                    examples.append({
-                        "input_ids": input_ids,
-                        "attention_mask": attention_mask,
-                        "labels": labels
-                    })
-                
-                # Add this turn to history
-                history.append(turn_text)
-        
-        return examples
+        logger.info(f"DialogueDataset initialized in {time.time() - total_start:.2f} seconds")
     
-    def add_learning_samples(self, samples: List[Dict]):
+    def _pre_compute_token_ids(self, assistant_token_id=None, role_token_ids=None):
         """
-        Add new samples for continuous learning.
+        Pre-compute token IDs for roles for faster processing.
         
         Args:
-            samples: List of conversation samples to add
+            assistant_token_id: Pre-computed assistant token ID
+            role_token_ids: Pre-computed set of role token IDs
+        """
+        # Use pre-computed values if provided
+        if assistant_token_id is not None and role_token_ids is not None:
+            self.assistant_token_id = assistant_token_id
+            self.role_token_ids = role_token_ids
+            logger.info("Using pre-computed token IDs")
+            return
+            
+        # Compute from scratch
+        logger.info("Pre-computing role token IDs")
+        
+        # Get assistant token ID
+        assistant_token = self.role_mapping.get("assistant", "<assistant>")
+        self.assistant_token_id = self.tokenizer.convert_tokens_to_ids(assistant_token)
+        
+        # Check if assistant token is recognized
+        if self.assistant_token_id == self.tokenizer.unk_token_id:
+            logger.warning(f"Assistant token '{assistant_token}' not found in tokenizer vocabulary!")
+            # Force add it to tokenizer if needed
+            if self.add_special_tokens and assistant_token not in self.tokenizer.get_vocab():
+                logger.info(f"Adding assistant token '{assistant_token}' to tokenizer")
+                self.tokenizer.add_special_tokens({"additional_special_tokens": [assistant_token]})
+                self.assistant_token_id = self.tokenizer.convert_tokens_to_ids(assistant_token)
+        
+        # Get all role token IDs
+        self.role_token_ids = set()
+        for role, token in self.role_mapping.items():
+            token_id = self.tokenizer.convert_tokens_to_ids(token)
+            if token_id != self.tokenizer.unk_token_id:
+                self.role_token_ids.add(token_id)
+            else:
+                logger.warning(f"Role token '{token}' not found in tokenizer vocabulary!")
+                # Force add it to tokenizer if needed
+                if self.add_special_tokens and token not in self.tokenizer.get_vocab():
+                    logger.info(f"Adding role token '{token}' to tokenizer")
+                    self.tokenizer.add_special_tokens({"additional_special_tokens": [token]})
+                    token_id = self.tokenizer.convert_tokens_to_ids(token)
+                    self.role_token_ids.add(token_id)
+        
+        logger.info(f"Pre-computed {len(self.role_token_ids)} role token IDs")
+        
+        # Verify assistant token is in role tokens
+        if self.assistant_token_id not in self.role_token_ids and self.assistant_token_id != self.tokenizer.unk_token_id:
+            logger.warning(f"Assistant token ID {self.assistant_token_id} not in role token IDs! Adding it.")
+            self.role_token_ids.add(self.assistant_token_id)
+    
+    def _load_dialogues(self) -> List[List[Dict[str, str]]]:
+        """
+        Load dialogue data from file.
         
         Returns:
-            Number of new examples added
+            List of dialogues, where each dialogue is a list of turns
         """
-        original_len = len(self.examples)
+        if not self.data_path:
+            raise ValueError("Either data_path or dialogues must be provided")
+            
+        if not os.path.exists(self.data_path):
+            raise FileNotFoundError(f"Data file not found: {self.data_path}")
         
-        # Add samples to conversations
-        self.conversations.extend(samples)
+        with open(self.data_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
         
-        # Update examples
-        self.examples = self._prepare_examples()
+        # Handle different data formats
+        if isinstance(data, list):
+            # Check if it's a list of dialogues or a list of messages
+            if data and isinstance(data[0], list):
+                # List of dialogues
+                dialogues = data
+            elif data and isinstance(data[0], dict) and "role" in data[0]:
+                # Single dialogue as a list of messages
+                dialogues = [data]
+            else:
+                # Try to parse as a list of dialogue objects
+                dialogues = []
+                for item in data:
+                    if isinstance(item, dict) and "messages" in item:
+                        dialogues.append(item["messages"])
+                    elif isinstance(item, dict) and "conversation" in item:
+                        dialogues.append(item["conversation"])
+                    elif isinstance(item, dict) and "dialogue" in item:
+                        dialogues.append(item["dialogue"])
+        elif isinstance(data, dict):
+            # Single dialogue object
+            if "messages" in data:
+                dialogues = [data["messages"]]
+            elif "conversation" in data:
+                dialogues = [data["conversation"]]
+            elif "dialogue" in data:
+                dialogues = [data["dialogue"]]
+            elif "dialogues" in data:
+                dialogues = data["dialogues"]
+            else:
+                raise ValueError(f"Unsupported data format in {self.data_path}")
+        else:
+            raise ValueError(f"Unsupported data format in {self.data_path}")
         
-        return len(self.examples) - original_len
+        # Validate and normalize dialogues
+        normalized_dialogues = []
+        for dialogue in dialogues:
+            normalized_dialogue = []
+            for turn in dialogue:
+                if isinstance(turn, dict):
+                    # Check if we have role and content
+                    if "role" in turn and "content" in turn:
+                        normalized_dialogue.append({
+                            "role": turn["role"],
+                            "content": turn["content"]
+                        })
+                    # Check if we have speaker and text
+                    elif "speaker" in turn and "text" in turn:
+                        normalized_dialogue.append({
+                            "role": turn["speaker"],
+                            "content": turn["text"]
+                        })
+                    # Check if we have role and message
+                    elif "role" in turn and "message" in turn:
+                        normalized_dialogue.append({
+                            "role": turn["role"],
+                            "content": turn["message"]
+                        })
+                elif isinstance(turn, list) and len(turn) == 2:
+                    # Handle format [role, content]
+                    normalized_dialogue.append({
+                        "role": turn[0],
+                        "content": turn[1]
+                    })
+            
+            # Only add if dialogue is valid
+            if normalized_dialogue:
+                normalized_dialogues.append(normalized_dialogue)
+        
+        return normalized_dialogues
     
-    def __len__(self):
-        """Get the number of examples in the dataset."""
-        return len(self.examples)
+    def _prepare_dialogues(self) -> List[Dict[str, torch.Tensor]]:
+        """
+        Prepare dialogues for training.
+        
+        This function tokenizes the dialogues and formats them for training.
+        
+        Returns:
+            List of tokenized dialogues
+        """
+        tokenized_dialogues = []
+        
+        # Create mini-batches for efficient processing
+        batch_size = self.processing_batch_size
+        num_batches = (len(self.dialogues) + batch_size - 1) // batch_size
+        
+        logger.info(f"Tokenizing {len(self.dialogues)} dialogues in {num_batches} batches")
+        
+        # Process in batches with a progress bar
+        for batch_idx in tqdm(range(num_batches), desc="Tokenizing dialogues"):
+            batch_start_time = time.time()
+            
+            start_idx = batch_idx * batch_size
+            end_idx = min((batch_idx + 1) * batch_size, len(self.dialogues))
+            batch_dialogues = self.dialogues[start_idx:end_idx]
+            
+            batch_formatted_texts = []
+            
+            # Format each dialogue
+            for dialogue in batch_dialogues:
+                # Add system prompt if provided
+                formatted_text = ""
+                if self.system_prompt:
+                    formatted_text += self._format_message("system", self.system_prompt)
+                
+                # Format dialogue turns
+                for turn in dialogue:
+                    role = turn["role"].lower()
+                    content = turn["content"]
+                    formatted_text += self._format_message(role, content)
+                
+                batch_formatted_texts.append(formatted_text)
+            
+            # Tokenize the batch
+            batch_encodings = self.tokenizer(
+                batch_formatted_texts,
+                max_length=self.max_length,
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt"
+            )
+            
+            # Process each item in the batch using optimized method
+            for i in range(len(batch_formatted_texts)):
+                input_ids = batch_encodings["input_ids"][i]
+                attention_mask = batch_encodings["attention_mask"][i]
+                
+                # Create labels using vectorized operations
+                labels = self._create_assistant_only_labels(input_ids)
+                
+                # Add to tokenized dialogues
+                tokenized_dialogues.append({
+                    "input_ids": input_ids,
+                    "attention_mask": attention_mask,
+                    "labels": labels
+                })
+            
+            if batch_idx % 5 == 0:  # Log every 5 batches
+                logger.info(f"Processed batch {batch_idx+1}/{num_batches} in {time.time() - batch_start_time:.2f}s")
+        
+        logger.info(f"Finished tokenizing {len(tokenized_dialogues)} dialogue examples")
+        return tokenized_dialogues
     
-    def __getitem__(self, idx):
-        """Get an example from the dataset."""
-        example = self.examples[idx]
+    def _create_assistant_only_labels(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Create labels that only compute loss on assistant tokens.
+        This is an optimized version that avoids nested loops.
         
-        if self.return_tensors:
-            # Convert to PyTorch tensors
-            return {
-                "input_ids": torch.tensor(example["input_ids"]),
-                "attention_mask": torch.tensor(example["attention_mask"]),
-                "labels": torch.tensor(example["labels"])
-            }
+        Args:
+            input_ids: Input token IDs
+            
+        Returns:
+            Labels tensor with non-assistant tokens set to -100
+        """
+        # Create initial labels
+        labels = input_ids.clone()
         
-        return example
+        # If assistant token ID is unknown, return original labels
+        if self.assistant_token_id == self.tokenizer.unk_token_id:
+            # For safety, set all labels to -100 to avoid NaN issues
+            # We'll compute loss on all tokens in this case
+            return labels
+            
+        # Find positions of assistant tokens
+        is_assistant = (input_ids == self.assistant_token_id)
+        
+        if not is_assistant.any():
+            # No assistant tokens found
+            # For safety, return regular language modeling labels (without masking)
+            # instead of setting all to -100, which could cause NaN loss
+            return labels
+            
+        # Initialize mask for keeping assistant's text (all False initially)
+        keep_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+        
+        # Find role token positions (including assistant)
+        is_role_token = torch.zeros_like(input_ids, dtype=torch.bool)
+        for i in range(len(input_ids)):
+            if input_ids[i].item() in self.role_token_ids:
+                is_role_token[i] = True
+        
+        # Process each assistant token
+        assistant_positions = is_assistant.nonzero().squeeze(1)
+        
+        # Make sure assistant_positions is always properly shaped
+        if assistant_positions.dim() == 0:
+            # Single position was found, reshape to 1D tensor
+            assistant_positions = assistant_positions.unsqueeze(0)
+        
+        for pos in assistant_positions:
+            # Get the next role token position after this assistant token
+            next_positions = (is_role_token & (torch.arange(len(input_ids), device=input_ids.device) > pos))
+            next_role_pos = next_positions.nonzero()
+            
+            # Determine end position (next role token or end of sequence)
+            if next_role_pos.numel() > 0:  # Check if tensor is not empty
+                # Take the first position found
+                end_pos = next_role_pos[0].item()
+            else:
+                # No more role tokens, go until padding or end
+                end_pos = len(input_ids)
+                
+                # Adjust for padding
+                pad_positions = (input_ids == self.tokenizer.pad_token_id)
+                if pad_positions.any():
+                    first_pad = pad_positions.nonzero()[0].item()
+                    if first_pad < end_pos:
+                        end_pos = first_pad
+            
+            # Mark tokens to keep (the assistant's response)
+            if pos < len(input_ids) - 1:  # Avoid out of bounds
+                if pos + 1 < end_pos:  # Only set if range is valid
+                    keep_mask[pos+1:end_pos] = True
+        
+        # Set non-assistant tokens to -100
+        labels[~keep_mask] = -100
+        
+        # Verify we didn't set ALL tokens to -100, which would cause NaN loss
+        if (labels == -100).all():
+            # If all tokens were masked (which would cause NaN loss),
+            # revert to standard language modeling
+            logger.warning("All tokens were masked! Reverting to standard language modeling to avoid NaN loss.")
+            return input_ids.clone()
+            
+        return labels
+    
+    def _format_message(self, role: str, content: str) -> str:
+        """
+        Format a message with role tokens.
+        
+        Args:
+            role: Role (system, user, assistant, etc.)
+            content: Message content
+            
+        Returns:
+            Formatted message with role tokens
+        """
+        role = role.lower()
+        role_token = self.role_mapping.get(role, f"<{role}>")
+        
+        if self.add_special_tokens:
+            formatted = f"{role_token} {content}"
+        else:
+            formatted = content
+            
+        if self.add_eos_token:
+            formatted += f" {self.tokenizer.eos_token}"
+            
+        return formatted
+    
+    def __len__(self) -> int:
+        """Get the number of dialogues."""
+        return len(self.tokenized_dialogues)
+    
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """Get a tokenized dialogue."""
+        return self.tokenized_dialogues[idx]
 
 
-def create_dialogue_dataloader(tokenizer, data_path=None, dataset_name=None, split="train", 
-                              batch_size=8, max_length=1024, speaker_tokens=None,
-                              system_prompt=None, shuffle=True, num_workers=4, 
-                              cache_dir=None, collate_fn=None, learning_samples=None):
+def dialogue_collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
     """
-    Create a DataLoader for dialogue data.
+    Collate function for dialogue batches.
     
     Args:
-        tokenizer: Tokenizer to use for preprocessing
-        data_path: Path to custom dialogue data (JSON format)
-        dataset_name: Name of the HF dataset to load (e.g., "daily_dialog")
-        split: Dataset split (train, validation, test)
-        batch_size: Batch size
-        max_length: Maximum sequence length
-        speaker_tokens: Dictionary mapping speaker roles to tokens
-        system_prompt: Optional system prompt to prepend to conversations
-        shuffle: Whether to shuffle the dataset
-        num_workers: Number of workers for data loading
-        cache_dir: Directory for caching the dataset
-        collate_fn: Function to collate data samples into batches
-        learning_samples: Optional additional samples for continuous learning
-    
+        batch: List of tokenized dialogues
+        
     Returns:
-        torch.utils.data.DataLoader: DataLoader for the dialogue dataset
+        Batched tensors
     """
-    # Create the dataset
-    dataset = DialogueDataset(
-        tokenizer=tokenizer,
-        data_path=data_path,
-        dataset_name=dataset_name,
-        split=split,
-        max_length=max_length,
-        speaker_tokens=speaker_tokens,
-        system_prompt=system_prompt,
-        cache_dir=cache_dir,
-        return_tensors=True,
-        learning_samples=learning_samples
-    )
-    
-    # Create the dataloader
-    dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        pin_memory=True,
-        collate_fn=collate_fn or dialogue_collate_fn
-    )
-    
-    return dataloader
-
-
-def dialogue_collate_fn(batch):
-    """
-    Collate function for padding sequences in a dialogue batch.
-    
-    Args:
-        batch: Batch of examples
-    
-    Returns:
-        Dict: Padded batch
-    """
-    # Get max length in the batch
-    max_len = max(len(example["input_ids"]) for example in batch)
-    
-    # Initialize padded arrays
-    input_ids = torch.full((len(batch), max_len), 0, dtype=torch.long)
-    attention_mask = torch.zeros((len(batch), max_len), dtype=torch.long)
-    labels = torch.full((len(batch), max_len), -100, dtype=torch.long)  # -100 is ignored in loss
-    
-    # Fill in data
-    for i, example in enumerate(batch):
-        seq_len = len(example["input_ids"])
-        input_ids[i, :seq_len] = example["input_ids"]
-        attention_mask[i, :seq_len] = example["attention_mask"]
-        labels[i, :seq_len] = example["labels"]
+    input_ids = torch.stack([item["input_ids"] for item in batch])
+    attention_mask = torch.stack([item["attention_mask"] for item in batch])
+    labels = torch.stack([item["labels"] for item in batch])
     
     return {
         "input_ids": input_ids,
         "attention_mask": attention_mask,
         "labels": labels
-    }
-
-
-def get_dialogue_dataloaders(tokenizer, data_path=None, dataset_name="daily_dialog", 
-                            batch_size=8, max_length=1024, speaker_tokens=None,
-                            system_prompt=None, num_workers=4, cache_dir=None, 
-                            collate_fn=None, learning_samples=None):
-    """
-    Get DataLoaders for the train, validation, and test splits of dialogue data.
-    
-    Args:
-        tokenizer: Tokenizer to use for preprocessing
-        data_path: Path to custom dialogue data (JSON format)
-        dataset_name: Name of the HF dataset to load (e.g., "daily_dialog")
-        batch_size: Batch size
-        max_length: Maximum sequence length
-        speaker_tokens: Dictionary mapping speaker roles to tokens
-        system_prompt: Optional system prompt to prepend to conversations
-        num_workers: Number of workers for data loading
-        cache_dir: Directory for caching the dataset
-        collate_fn: Function to collate data samples into batches
-        learning_samples: Optional additional samples for continuous learning
-    
-    Returns:
-        Dict: DataLoaders for train, validation, and test splits
-    """
-    train_loader = create_dialogue_dataloader(
-        tokenizer=tokenizer,
-        data_path=data_path,
-        dataset_name=dataset_name,
-        split="train",
-        batch_size=batch_size,
-        max_length=max_length,
-        speaker_tokens=speaker_tokens,
-        system_prompt=system_prompt,
-        shuffle=True,
-        num_workers=num_workers,
-        cache_dir=cache_dir,
-        collate_fn=collate_fn,
-        learning_samples=learning_samples
-    )
-    
-    val_loader = create_dialogue_dataloader(
-        tokenizer=tokenizer,
-        data_path=data_path,
-        dataset_name=dataset_name,
-        split="validation",
-        batch_size=batch_size,
-        max_length=max_length,
-        speaker_tokens=speaker_tokens,
-        system_prompt=system_prompt,
-        shuffle=False,
-        num_workers=num_workers,
-        cache_dir=cache_dir,
-        collate_fn=collate_fn
-    )
-    
-    # Not all datasets have a test split, so handle gracefully
-    try:
-        test_loader = create_dialogue_dataloader(
-            tokenizer=tokenizer,
-            data_path=data_path,
-            dataset_name=dataset_name,
-            split="test",
-            batch_size=batch_size,
-            max_length=max_length,
-            speaker_tokens=speaker_tokens,
-            system_prompt=system_prompt,
-            shuffle=False,
-            num_workers=num_workers,
-            cache_dir=cache_dir,
-            collate_fn=collate_fn
-        )
-    except Exception:
-        # Fall back to validation set if test is not available
-        test_loader = val_loader
-    
-    return {
-        "train": train_loader,
-        "validation": val_loader,
-        "test": test_loader
     }

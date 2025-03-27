@@ -4,10 +4,14 @@ Quick start example for Semantic Resonance Language Model.
 
 This script demonstrates how to train a small model on a subset of
 WikiText-103 for a few steps, to verify the implementation works.
+It also shows how to save and load checkpoints.
 """
 
 import os
 import torch
+import argparse
+import json
+from datetime import datetime
 from transformers import AutoTokenizer
 from datasets import load_dataset
 import sys
@@ -17,14 +21,117 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.config import ModelConfig, TrainingConfig, DataConfig
 from src.model.semantic_resonance_model import SemanticResonanceModel
-from src.data.wikitext_dataset import WikiTextDataset
+from src.training.checkpoint import save_checkpoint, load_checkpoint
 from torch.utils.data import DataLoader
 
 
-def quick_start_demo():
+def save_training_checkpoint(
+    model, 
+    optimizer, 
+    epoch, 
+    step, 
+    model_config, 
+    training_config, 
+    loss, 
+    output_dir, 
+    tokenizer=None
+):
+    """
+    Save a training checkpoint.
+    
+    Args:
+        model: The model to save
+        optimizer: The optimizer state
+        epoch: Current epoch
+        step: Current step
+        model_config: Model configuration
+        training_config: Training configuration
+        loss: Current loss value
+        output_dir: Directory to save checkpoint in
+        tokenizer: Optional tokenizer to save
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Create a checkpoint filename with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    checkpoint_path = os.path.join(output_dir, f"checkpoint_epoch{epoch}_step{step}_{timestamp}.pt")
+    
+    # Save checkpoint
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "epoch": epoch,
+        "step": step,
+        "model_config": model_config.to_dict() if hasattr(model_config, "to_dict") else vars(model_config),
+        "training_config": training_config.to_dict() if hasattr(training_config, "to_dict") else vars(training_config),
+        "loss": loss
+    }
+    
+    # Save the checkpoint
+    torch.save(checkpoint, checkpoint_path)
+    
+    # Save tokenizer if provided
+    if tokenizer is not None:
+        tokenizer_path = os.path.join(output_dir, "tokenizer")
+        os.makedirs(tokenizer_path, exist_ok=True)
+        tokenizer.save_pretrained(tokenizer_path)
+        
+    # Save configs as JSON for easy inspection
+    with open(os.path.join(output_dir, "model_config.json"), "w") as f:
+        json.dump(checkpoint["model_config"], f, indent=4)
+        
+    with open(os.path.join(output_dir, "training_config.json"), "w") as f:
+        json.dump(checkpoint["training_config"], f, indent=4)
+    
+    print(f"Checkpoint saved to {checkpoint_path}")
+    return checkpoint_path
+
+
+def load_training_checkpoint(checkpoint_path, model, optimizer, device):
+    """
+    Load a training checkpoint.
+    
+    Args:
+        checkpoint_path: Path to the checkpoint file
+        model: Model to load into
+        optimizer: Optimizer to load into
+        device: Device to load model to
+        
+    Returns:
+        epoch, step, model_config, training_config, loss
+    """
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    
+    # Load checkpoint
+    print(f"Loading checkpoint from {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # Restore model state
+    model.load_state_dict(checkpoint["model_state_dict"])
+    
+    # Restore optimizer state
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    
+    # Return training state
+    return (
+        checkpoint["epoch"], 
+        checkpoint["step"], 
+        checkpoint["model_config"], 
+        checkpoint["training_config"], 
+        checkpoint["loss"]
+    )
+
+
+def quick_start_demo(resume_checkpoint=None):
     """Run a quick demonstration of the model."""
     print("Semantic Resonance Language Model - Quick Start Demo")
     print("===================================================")
+    
+    # Determine output directory for checkpoints
+    output_dir = os.path.join("examples", "output", "quick_start_checkpoints")
+    os.makedirs(output_dir, exist_ok=True)
     
     # Create a minimal model configuration
     model_config = ModelConfig(
@@ -52,8 +159,9 @@ def quick_start_demo():
         max_epochs=10,      # Multiple epochs for better training
         warmup_steps=10,
         accumulation_steps=1,
-        save_steps=50,
-        eval_steps=25
+        save_steps=50,      # Save every 50 steps
+        eval_steps=25,
+        checkpoint_dir=output_dir
     )
     
     # Set device
@@ -112,12 +220,30 @@ def quick_start_demo():
         weight_decay=training_config.weight_decay
     )
     
+    # Initialize variables for training state
+    start_epoch = 0
+    global_step = 0
+    best_loss = float('inf')
+    
+    # Load checkpoint if specified
+    if resume_checkpoint:
+        start_epoch, global_step, loaded_model_config, loaded_training_config, last_loss = \
+            load_training_checkpoint(resume_checkpoint, model, optimizer, device)
+        print(f"Resuming from epoch {start_epoch+1}, step {global_step}")
+        # Optionally update configs with loaded values
+        # model_config = ModelConfig(**loaded_model_config)
+        # training_config = TrainingConfig(**loaded_training_config)
+        
+        # Start from the next epoch
+        start_epoch += 1
+        
     # Train for multiple epochs
-    print(f"Training for {training_config.max_epochs} epochs...")
+    print(f"Training for {training_config.max_epochs} epochs starting from epoch {start_epoch+1}...")
     model.train()
     
-    for epoch in range(training_config.max_epochs):
+    for epoch in range(start_epoch, training_config.max_epochs):
         epoch_loss = 0.0
+        steps_in_epoch = 0
         print(f"\nEpoch {epoch+1}/{training_config.max_epochs}")
         print("-" * 30)
         
@@ -131,6 +257,8 @@ def quick_start_demo():
             
             # Track loss
             epoch_loss += loss.item()
+            steps_in_epoch += 1
+            global_step += 1
             
             # Backward pass
             loss.backward()
@@ -140,7 +268,21 @@ def quick_start_demo():
             optimizer.zero_grad()
             
             # Print progress
-            print(f"Epoch {epoch+1}/{training_config.max_epochs}, Step {i+1}/{len(dataloader)}, Loss: {loss.item():.4f}")
+            print(f"Epoch {epoch+1}/{training_config.max_epochs}, Step {i+1}/{len(dataloader)}, Loss: {loss.item():.4f}, Global Step: {global_step}")
+            
+            # Save checkpoint at regular intervals
+            if global_step % training_config.save_steps == 0:
+                checkpoint_path = save_training_checkpoint(
+                    model=model,
+                    optimizer=optimizer,
+                    epoch=epoch,
+                    step=global_step,
+                    model_config=model_config,
+                    training_config=training_config,
+                    loss=loss.item(),
+                    output_dir=output_dir,
+                    tokenizer=tokenizer if global_step % (training_config.save_steps * 5) == 0 else None  # Save tokenizer less frequently
+                )
             
             # Get metadata from the last layer
             if "metadata" in outputs:
@@ -157,13 +299,39 @@ def quick_start_demo():
                         print(f"  Average iterations: {avg_iters:.2f}")
         
         # Print epoch summary
-        avg_epoch_loss = epoch_loss / len(dataloader)
+        avg_epoch_loss = epoch_loss / steps_in_epoch
         print(f"\nEpoch {epoch+1} completed. Average loss: {avg_epoch_loss:.4f}")
+        
+        # Save checkpoint after each epoch
+        epoch_checkpoint_path = save_training_checkpoint(
+            model=model,
+            optimizer=optimizer,
+            epoch=epoch,
+            step=global_step,
+            model_config=model_config,
+            training_config=training_config,
+            loss=avg_epoch_loss,
+            output_dir=output_dir,
+            tokenizer=tokenizer  # Save tokenizer with epoch checkpoints
+        )
+        
+        # Track best model
+        if avg_epoch_loss < best_loss:
+            best_loss = avg_epoch_loss
+            best_model_path = os.path.join(output_dir, "best_model.pt")
+            print(f"New best model! Saving to {best_model_path}")
+            torch.save({
+                "model_state_dict": model.state_dict(),
+                "loss": best_loss,
+                "epoch": epoch,
+                "model_config": model_config.to_dict() if hasattr(model_config, "to_dict") else vars(model_config),
+            }, best_model_path)
     
-    # Save tiny model
-    os.makedirs("examples/output", exist_ok=True)
-    model.save_pretrained("examples/output/tiny_model")
-    tokenizer.save_pretrained("examples/output/tiny_model")
+    # Save final model
+    final_output_dir = os.path.join("examples", "output", "tiny_model")
+    os.makedirs(final_output_dir, exist_ok=True)
+    model.save_pretrained(final_output_dir)
+    tokenizer.save_pretrained(final_output_dir)
     
     # Generate a short text sample
     print("\nGenerating text sample...")
@@ -192,11 +360,19 @@ def quick_start_demo():
     print("-" * 40)
     
     print("\nDemo completed successfully!")
-    print(f"Saved model to examples/output/tiny_model")
+    print(f"Final model saved to {final_output_dir}")
+    print(f"Checkpoints saved to {output_dir}")
+    print(f"Best model saved to {os.path.join(output_dir, 'best_model.pt')}")
 
 
 if __name__ == "__main__":
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Semantic Resonance Language Model Quick Start Demo")
+    parser.add_argument("--resume", type=str, help="Path to checkpoint to resume from", default=None)
+    args = parser.parse_args()
+    
     # Make sure the examples directory exists
     os.makedirs(os.path.dirname(os.path.abspath(__file__)), exist_ok=True)
     
-    quick_start_demo()
+    # Run demo with optional checkpoint resumption
+    quick_start_demo(resume_checkpoint=args.resume)

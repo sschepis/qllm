@@ -1,223 +1,183 @@
 """
-Logging utilities for the Quantum Resonance Language Model.
-Provides structured, configurable logging for training, evaluation,
-and other operations.
+Logging utilities for QLLM.
+
+This module provides logging functionality for the Quantum Resonance
+Language Model, including setup for file and console logging.
 """
 
-import logging
 import os
 import sys
-import time
+import logging
 from typing import Optional
-
-# Custom log levels
-VERBOSE = 15
-logging.addLevelName(VERBOSE, "VERBOSE")
-
-class ColoredFormatter(logging.Formatter):
-    """
-    Custom formatter that adds colors to log messages.
-    """
-    COLORS = {
-        'DEBUG': '\033[0;36m',     # Cyan
-        'VERBOSE': '\033[0;34m',   # Blue
-        'INFO': '\033[0;32m',      # Green
-        'WARNING': '\033[0;33m',   # Yellow
-        'ERROR': '\033[0;31m',     # Red
-        'CRITICAL': '\033[1;31m',  # Bold Red
-        'RESET': '\033[0m',        # Reset color
-    }
-
-    def format(self, record):
-        log_message = super().format(record)
-        level_name = record.levelname
-        
-        # Add color if terminal supports it and not redirected
-        if sys.stdout.isatty() and level_name in self.COLORS:
-            return f"{self.COLORS[level_name]}{log_message}{self.COLORS['RESET']}"
-        else:
-            return log_message
 
 
 def setup_logger(
-    name: str = "quantum_resonance",
+    name: str = "qllm",
     log_file: Optional[str] = None,
-    log_level: int = logging.INFO,
-    log_format: str = "%(asctime)s - %(levelname)s - %(message)s",
-    date_format: str = "%m/%d/%Y %H:%M:%S",
-    file_level: Optional[int] = None
+    log_level: int = logging.INFO
 ) -> logging.Logger:
     """
-    Set up a logger with console and optional file output.
+    Set up a logger with console and file handlers.
     
     Args:
-        name: Logger name
-        log_file: Optional path to log file
-        log_level: Console logging level
-        log_format: Format for log messages
-        date_format: Format for timestamps
-        file_level: Separate logging level for file (defaults to log_level)
+        name: Name of the logger
+        log_file: Path to log file (if None, only console logging is enabled)
+        log_level: Logging level (e.g., logging.INFO, logging.DEBUG)
         
     Returns:
-        Logger: Configured logger
+        Configured logger
     """
     # Create logger
     logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG)  # Capture all levels in handlers
+    logger.setLevel(log_level)
     
-    # Remove existing handlers if any
-    for handler in logger.handlers[:]:
-        logger.removeHandler(handler)
+    # Remove existing handlers to avoid duplicates
+    if logger.handlers:
+        for handler in logger.handlers:
+            logger.removeHandler(handler)
     
-    # Console handler with colored output
-    console_handler = logging.StreamHandler()
+    # Create formatter
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    
+    # Create console handler
+    console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(log_level)
-    console_formatter = ColoredFormatter(log_format, datefmt=date_format)
-    console_handler.setFormatter(console_formatter)
+    console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
     
-    # File handler if requested
+    # Create file handler if log file specified
     if log_file:
         # Ensure directory exists
-        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        log_dir = os.path.dirname(log_file)
+        if log_dir and not os.path.exists(log_dir):
+            os.makedirs(log_dir, exist_ok=True)
         
         # Create file handler
         file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(file_level if file_level is not None else log_level)
-        file_formatter = logging.Formatter(log_format, datefmt=date_format)
-        file_handler.setFormatter(file_formatter)
+        file_handler.setLevel(log_level)
+        file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
-    
-    # Add verbose method
-    def verbose(self, message, *args, **kwargs):
-        self.log(VERBOSE, message, *args, **kwargs)
-    
-    logging.Logger.verbose = verbose
-    
-    return logger
-
-
-def get_default_logger():
-    """
-    Get the default logger (creates it if doesn't exist).
-    
-    Returns:
-        Logger: Default quantum_resonance logger
-    """
-    logger = logging.getLogger("quantum_resonance")
-    
-    # If logger has no handlers, set up the default
-    if not logger.handlers:
-        return setup_logger()
     
     return logger
 
 
 class TrainingLogger:
-    """
-    Specialized logger for training with progress tracking.
-    """
-    def __init__(self, logger=None, log_interval=10):
+    """Logger for training progress with detailed metrics."""
+    
+    def __init__(self, logger: Optional[logging.Logger] = None, log_interval: int = 10):
         """
         Initialize training logger.
         
         Args:
-            logger: Logger instance (creates default if None)
-            log_interval: How often to log detailed info (in batches)
+            logger: Logger instance (if None, a new one is created)
+            log_interval: How often to log detailed metrics
         """
-        self.logger = logger or get_default_logger()
+        self.logger = logger or setup_logger("training")
         self.log_interval = log_interval
-        self.epoch_start_time = None
-        self.batch_start_time = None
-        self.global_step = 0
-        
-    def start_epoch(self, epoch, total_epochs):
-        """Log start of epoch"""
-        self.epoch_start_time = time.time()
-        self.logger.info(f"Starting epoch {epoch+1}/{total_epochs}")
-        
-    def end_epoch(self, epoch, epoch_loss, val_metrics=None):
-        """Log end of epoch with metrics"""
-        epoch_time = time.time() - self.epoch_start_time
-        self.logger.info(f"Epoch {epoch+1} completed in {epoch_time:.1f}s. "
-                        f"Average loss: {epoch_loss:.4f}")
-        
-        if val_metrics:
-            self.logger.info("Validation metrics:")
-            for key, value in val_metrics.items():
-                if isinstance(value, float):
-                    self.logger.info(f"  {key}: {value:.4f}")
-                else:
-                    self.logger.info(f"  {key}: {value}")
+        self.last_log_time = 0
     
-    def log_batch(self, epoch, batch_idx, batch_size, num_batches, loss, lr=None):
-        """Log batch metrics, showing progress bar in integer percentages"""
-        self.global_step += 1
+    def start_epoch(self, epoch: int, max_epochs: int) -> None:
+        """
+        Log epoch start.
         
-        # Calculate progress percentage
-        progress = 100. * batch_idx / num_batches
-        
-        # Only log at intervals to avoid spamming
-        if batch_idx % self.log_interval == 0:
-            # Calculate estimated time remaining
-            if self.batch_start_time is not None:
-                batch_time = time.time() - self.batch_start_time
-                remaining_batches = num_batches - batch_idx
-                eta = remaining_batches * batch_time
-                eta_str = f", ETA: {eta:.1f}s"
-            else:
-                eta_str = ""
-            
-            # Log with progress bar
-            log_msg = f"Epoch {epoch+1} [{batch_idx}/{num_batches} ({progress:.0f}%)]"
-            log_msg += f" Loss: {loss:.4f}"
-            
-            if lr is not None:
-                log_msg += f", LR: {lr:.6f}"
-                
-            log_msg += eta_str
-            
-            self.logger.info(log_msg)
-        
-        # Update batch start time
-        self.batch_start_time = time.time()
+        Args:
+            epoch: Current epoch
+            max_epochs: Maximum number of epochs
+        """
+        self.logger.info(f"Starting epoch {epoch+1}/{max_epochs}")
     
-    def log_validation(self, metrics):
-        """Log validation metrics"""
-        log_msg = "Validation results: "
+    def end_epoch(self, epoch: int, loss: float) -> None:
+        """
+        Log epoch end.
         
-        # Format each metric
-        formatted_metrics = []
-        for key, value in metrics.items():
-            if isinstance(value, float):
-                formatted_metrics.append(f"{key}={value:.4f}")
-            else:
-                formatted_metrics.append(f"{key}={value}")
+        Args:
+            epoch: Current epoch
+            loss: Final loss value
+        """
+        self.logger.info(f"Epoch {epoch+1} completed with loss {loss:.4f}")
+    
+    def log_batch(
+        self,
+        epoch: int,
+        batch: int,
+        batch_size: int,
+        total_batches: int,
+        loss: float,
+        learning_rate: float
+    ) -> None:
+        """
+        Log batch metrics.
         
-        log_msg += ", ".join(formatted_metrics)
-        self.logger.info(log_msg)
+        Args:
+            epoch: Current epoch
+            batch: Current batch
+            batch_size: Batch size
+            total_batches: Total number of batches
+            loss: Batch loss
+            learning_rate: Current learning rate
+        """
+        if batch % self.log_interval == 0:
+            progress = batch / total_batches * 100
+            self.logger.info(
+                f"Epoch {epoch+1}, Batch {batch}/{total_batches} ({progress:.1f}%) "
+                f"- Loss: {loss:.4f}, LR: {learning_rate:.6f}"
+            )
     
-    def log_checkpoint(self, path):
-        """Log checkpoint saving"""
-        self.logger.info(f"Saving checkpoint to {path}")
+    def log_validation(self, metrics: dict) -> None:
+        """
+        Log validation metrics.
+        
+        Args:
+            metrics: Dictionary of validation metrics
+        """
+        metrics_str = ", ".join(f"{k}: {v:.4f}" for k, v in metrics.items())
+        self.logger.info(f"Validation: {metrics_str}")
     
-    def log_error(self, error, context=""):
-        """Log error with context"""
-        if context:
-            self.logger.error(f"{context}: {error}")
-        else:
-            self.logger.error(f"{error}")
+    def log_checkpoint(self, path: str) -> None:
+        """
+        Log checkpoint save.
+        
+        Args:
+            path: Path to saved checkpoint
+        """
+        self.logger.info(f"Saved checkpoint to {path}")
     
-    def log_memory(self, prefix=""):
-        """Log memory usage if running with CUDA"""
+    def log_memory(self, prefix: str = "") -> None:
+        """
+        Log memory usage.
+        
+        Args:
+            prefix: Prefix string for the log message
+        """
         try:
             import torch
+            import psutil
+            
+            process = psutil.Process(os.getpid())
+            mem_info = process.memory_info()
+            
+            # System memory
+            system_mem = psutil.virtual_memory()
+            
+            # Log memory info
+            mem_str = (
+                f"{prefix} Memory - "
+                f"System: {system_mem.percent}% used, "
+                f"Process: {mem_info.rss / (1024 ** 3):.2f} GB"
+            )
+            
+            # Add GPU info if available
             if torch.cuda.is_available():
-                allocated = torch.cuda.memory_allocated() / (1024 ** 2)
-                max_allocated = torch.cuda.max_memory_allocated() / (1024 ** 2)
-                
-                msg = f"{prefix} CUDA Memory: {allocated:.1f}MB"
-                msg += f" (peak: {max_allocated:.1f}MB)"
-                self.logger.verbose(msg)
-        except:
-            pass
+                torch.cuda.synchronize()
+                gpu_mem_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
+                gpu_mem_cached = torch.cuda.memory_reserved() / (1024 ** 3)
+                mem_str += f", GPU allocated: {gpu_mem_alloc:.2f} GB, cached: {gpu_mem_cached:.2f} GB"
+            
+            self.logger.info(mem_str)
+        except ImportError:
+            self.logger.warning("Memory logging requires psutil. Install with 'pip install psutil'")
+        except Exception as e:
+            self.logger.warning(f"Memory logging failed: {e}")

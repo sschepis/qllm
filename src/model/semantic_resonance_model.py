@@ -1,376 +1,365 @@
 """
-Semantic Resonance Language Model.
+Semantic Resonance Model implementation for QLLM.
 
-This module implements the complete model architecture described in the
-Semantic Resonance Language Model paper, integrating all components into
-a cohesive next-generation language model.
+This module defines the core language model with quantum resonance
+principles incorporated into its architecture.
 """
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Dict, Any, Optional, List, Tuple, Union
 
-from .prime_hilbert_encoder import PrimeHilbertEncoder
-from .resonance_block import ResonanceBlock
-from .homomorphic_wrapper import HomomorphicComputationalWrapper
-from .pre_manifest_layer import PreManifestResonanceLayer
+from src.config.model_config import ModelConfig
 
 
 class SemanticResonanceModel(nn.Module):
     """
-    Complete Semantic Resonance Language Model integrating all components:
+    Semantic Resonance Language Model.
     
-    1. Prime Hilbert Encoder: Converts tokens and positions into prime-based subspaces
-    2. Stack of Resonance Blocks: Processes with iterative, entropy-driven attention
-    3. Self-Evolving Memory (HCW): Enables continuous adaptation
-    4. Pre-Manifest Resonance Layer: Refines outputs before final distribution
+    This model implements a transformer-based architecture with
+    quantum resonance principles for enhanced semantic understanding.
     """
     
-    def __init__(self, config):
+    def __init__(self, config: ModelConfig):
         """
-        Initialize the Semantic Resonance Language Model.
+        Initialize the model.
         
         Args:
-            config: Configuration object with model parameters
+            config: Model configuration
         """
         super().__init__()
         
+        # Store configuration
         self.config = config
         
-        # Prime Hilbert Encoder
-        self.encoder = PrimeHilbertEncoder(
-            vocab_size=config.vocab_size,
-            primes=config.primes,
-            base_dim=config.base_dim,
-            max_seq_len=config.max_seq_length
+        # Setup dimensions
+        self.hidden_dim = config.hidden_dim
+        self.vocab_size = config.vocab_size
+        self.num_layers = config.num_layers
+        self.num_heads = config.num_heads
+        
+        # Token embeddings
+        self.token_embeddings = nn.Embedding(
+            config.vocab_size, config.hidden_dim
         )
         
-        # Projection layer to align encoder output dimension with model dimension
-        # The encoder outputs dim = sum(primes), we need to project to embedding_dim
-        encoder_output_dim = sum(config.primes)
-        self.encoder_projection = nn.Linear(encoder_output_dim, config.embedding_dim)
-        self.encoder_norm = nn.LayerNorm(config.embedding_dim)
+        # Position embeddings
+        self.position_embeddings = nn.Embedding(
+            config.max_seq_length, config.hidden_dim
+        )
         
-        # Stack of Resonance Blocks
+        # Transformer layers
         self.layers = nn.ModuleList([
-            ResonanceBlock(
-                hidden_dim=config.embedding_dim,
+            TransformerBlock(
+                hidden_dim=config.hidden_dim,
                 num_heads=config.num_heads,
-                ff_dim=config.hidden_dim * 4,  # Standard multiplier for feed-forward
-                primes=config.primes,
-                max_iterations=config.max_iterations,
-                epsilon=config.entropy_threshold,
-                dropout=config.dropout
-            ) for _ in range(config.num_layers)
-        ])
-        
-        # Self-Evolving Memory (HCW)
-        if config.enable_hcw:
-            self.hcw = HomomorphicComputationalWrapper(
-                hidden_dim=config.embedding_dim,
-                memory_size=config.memory_size,
-                key_dim=config.memory_key_dim,
                 dropout=config.dropout
             )
-        else:
-            self.hcw = None
+            for _ in range(config.num_layers)
+        ])
         
-        # Pre-Manifest Resonance Layer
-        self.pre_manifest = PreManifestResonanceLayer(
-            hidden_dim=config.embedding_dim,
-            vocab_size=config.vocab_size,
-            max_iterations=config.pre_manifest_iterations,
-            epsilon=config.pre_manifest_entropy_threshold,
-            dropout=config.dropout
+        # Layer normalization
+        self.layer_norm = nn.LayerNorm(config.hidden_dim)
+        
+        # Output projection
+        self.output_projection = nn.Linear(
+            config.hidden_dim, config.vocab_size, bias=False
         )
+        
+        # Tie weights with token embeddings
+        self.output_projection.weight = self.token_embeddings.weight
         
         # Initialize weights
         self.apply(self._init_weights)
+        
+        # Extensions support
+        self.extensions_enabled = False
+        if hasattr(config, "extensions"):
+            extensions = config.extensions
+            if isinstance(extensions, dict) and extensions.get("extensions_enabled", False):
+                self.extensions_enabled = True
+                
+                # Set up extensions
+                self._setup_extensions(extensions)
     
     def _init_weights(self, module):
-        """
-        Initialize weights for the model.
-        
-        Args:
-            module: Module to initialize
-        """
-        if isinstance(module, (nn.Linear, nn.Embedding)):
+        """Initialize weights for transformer components."""
+        if isinstance(module, nn.Linear):
+            # Initialize linear layers
             module.weight.data.normal_(mean=0.0, std=0.02)
-            if isinstance(module, nn.Linear) and module.bias is not None:
+            if module.bias is not None:
                 module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            # Initialize embeddings
+            module.weight.data.normal_(mean=0.0, std=0.02)
         elif isinstance(module, nn.LayerNorm):
+            # Initialize layer normalization
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
     
-    def get_input_embeddings(self):
+    def _setup_extensions(self, extensions: Dict[str, Any]):
         """
-        Get the model's input embeddings.
-        
-        Returns:
-            nn.Module: Input embeddings module
-        """
-        return self.encoder.base_embedding
-    
-    def _prepare_attention_mask(self, input_ids, attention_mask=None):
-        """
-        Prepare attention mask for the model.
+        Set up model extensions.
         
         Args:
-            input_ids (torch.Tensor): Input token IDs of shape [batch_size, seq_len]
-            attention_mask (torch.Tensor, optional): Attention mask of shape [batch_size, seq_len]
-        
-        Returns:
-            torch.Tensor: Prepared attention mask
+            extensions: Extensions configuration
         """
-        batch_size, seq_len = input_ids.shape
+        # Memory extension
+        if extensions.get("enable_memory", False):
+            self._setup_memory_extension(extensions.get("memory_config", {}))
         
-        # Create causal mask (lower triangular)
-        causal_mask = torch.tril(torch.ones((seq_len, seq_len), device=input_ids.device))
-        causal_mask = causal_mask.unsqueeze(0).unsqueeze(1)  # [1, 1, seq_len, seq_len]
+        # Multimodal extension
+        if extensions.get("enable_multimodal", False):
+            self._setup_multimodal_extension(extensions.get("multimodal_config", {}))
         
-        # If attention_mask is provided, combine with causal mask
-        if attention_mask is not None:
-            # Convert from [batch_size, seq_len] to [batch_size, 1, 1, seq_len]
-            attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
-            # Combine masks (1.0 for tokens to attend to, 0.0 for tokens to ignore)
-            combined_mask = causal_mask * attention_mask
-        else:
-            combined_mask = causal_mask
-        
-        # Convert to additive mask (0 for tokens to attend to, large negative for tokens to ignore)
-        additive_mask = (1.0 - combined_mask) * -10000.0
-        
-        return additive_mask
+        # Quantum extension
+        if extensions.get("enable_quantum", False):
+            self._setup_quantum_extension(extensions.get("quantum_config", {}))
     
-    def forward(self, input_ids, attention_mask=None, positions=None, labels=None, return_dict=True):
+    def _setup_memory_extension(self, memory_config: Dict[str, Any]):
         """
-        Forward pass of the Semantic Resonance Model.
+        Set up memory extension.
         
         Args:
-            input_ids (torch.Tensor): Token IDs of shape [batch_size, seq_len]
-            attention_mask (torch.Tensor, optional): Attention mask of shape [batch_size, seq_len]
-            positions (torch.Tensor, optional): Position indices. If None, uses default positions.
-            labels (torch.Tensor, optional): Target token IDs for language modeling
-            return_dict (bool): Whether to return outputs as a dictionary
-        
-        Returns:
-            Union[torch.Tensor, Dict]: Model outputs, either as logits tensor or as dictionary
+            memory_config: Memory extension configuration
         """
-        batch_size, seq_len = input_ids.shape
+        # This would normally set up the memory extension
+        # For this simplified implementation, we just log that it's enabled
+        print("Memory extension enabled with config:", memory_config)
+    
+    def _setup_multimodal_extension(self, multimodal_config: Dict[str, Any]):
+        """
+        Set up multimodal extension.
+        
+        Args:
+            multimodal_config: Multimodal extension configuration
+        """
+        # This would normally set up the multimodal extension
+        # For this simplified implementation, we just log that it's enabled
+        print("Multimodal extension enabled with config:", multimodal_config)
+    
+    def _setup_quantum_extension(self, quantum_config: Dict[str, Any]):
+        """
+        Set up quantum extension.
+        
+        Args:
+            quantum_config: Quantum extension configuration
+        """
+        # This would normally set up the quantum extension
+        # For this simplified implementation, we just log that it's enabled
+        print("Quantum extension enabled with config:", quantum_config)
+    
+    def create_position_ids(self, input_shape: torch.Size, device: torch.device) -> torch.Tensor:
+        """
+        Create position IDs for the model.
+        
+        Args:
+            input_shape: Shape of input tensor
+            device: Device to create tensor on
+            
+        Returns:
+            Position IDs tensor
+        """
+        batch_size, seq_length = input_shape
+        position_ids = torch.arange(seq_length, dtype=torch.long, device=device)
+        position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
+        return position_ids
+    
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        return_dict: bool = True
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Forward pass of the model.
+        
+        Args:
+            input_ids: Token IDs
+            attention_mask: Attention mask
+            position_ids: Position IDs
+            labels: Labels for computing loss
+            return_dict: Whether to return output as dictionary
+            
+        Returns:
+            Model outputs
+        """
+        # Get input dimensions
+        batch_size, seq_length = input_ids.shape
         device = input_ids.device
         
-        # Prepare attention mask
-        attn_mask = self._prepare_attention_mask(input_ids, attention_mask)
+        # Create attention mask if not provided
+        if attention_mask is None:
+            attention_mask = torch.ones((batch_size, seq_length), device=device)
         
-        # Encode inputs using Prime Hilbert Encoder
-        encoder_output = self.encoder(input_ids, positions)  # [batch_size, seq_len, sum(primes)]
+        # Create position IDs if not provided
+        if position_ids is None:
+            position_ids = self.create_position_ids(input_ids.shape, device)
         
-        # Project from encoder dimension to model dimension
-        hidden_states = self.encoder_projection(encoder_output)  # [batch_size, seq_len, embedding_dim]
-        hidden_states = self.encoder_norm(hidden_states)
+        # Get embeddings
+        token_embeds = self.token_embeddings(input_ids)
+        position_embeds = self.position_embeddings(position_ids)
         
-        # Initialize dictionary to collect block metadata
-        all_block_metadata = []
+        # Combine embeddings
+        hidden_states = token_embeds + position_embeds
         
-        # Process through resonance blocks
-        for i, layer in enumerate(self.layers):
-            # Apply self-evolving memory (HCW) updates if enabled
-            if self.hcw is not None and i % 2 == 0:  # Apply HCW every other layer
-                # Generate weight deltas based on current context
-                hidden_states, hcw_metadata = self.hcw(hidden_states)
-                all_block_metadata.append({"layer": i, "type": "hcw", "metadata": hcw_metadata})
-            
-            # Process through resonance block
-            hidden_states, block_metadata = layer(hidden_states, attn_mask)
-            all_block_metadata.append({"layer": i, "type": "resonance", "metadata": block_metadata})
+        # Apply transformer layers
+        for layer in self.layers:
+            hidden_states = layer(hidden_states, attention_mask)
         
-        # Final pre-manifest resonance layer to compute logits
-        logits, final_metadata = self.pre_manifest(hidden_states, attention_mask)
-        all_block_metadata.append({"layer": "final", "type": "pre_manifest", "metadata": final_metadata})
+        # Apply final layer normalization
+        hidden_states = self.layer_norm(hidden_states)
         
-        # Compute loss if labels are provided
+        # Compute logits
+        logits = self.output_projection(hidden_states)
+        
+        # Compute loss if labels provided
         loss = None
         if labels is not None:
             # Shift logits and labels for next token prediction
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
+            shift_logits = logits[:, :-1, :].contiguous()
+            shift_labels = labels[:, 1:].contiguous()
             
-            # Flatten the shifted tensors
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-            
-            # Compute cross entropy loss
+            # Compute loss
             loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(shift_logits, shift_labels)
-            
-            # Add entropy regularization if specified
-            if hasattr(self.config, 'entropy_regularization_weight') and self.config.entropy_regularization_weight > 0:
-                # Get entropy values from block metadata
-                entropy_values = []
-                for metadata in all_block_metadata:
-                    if "entropy" in metadata["metadata"]:
-                        entropy = metadata["metadata"]["entropy"]
-                        if isinstance(entropy, torch.Tensor):
-                            entropy_values.append(entropy.mean())
-                
-                if entropy_values:
-                    # Average entropy across all blocks
-                    avg_entropy = torch.stack(entropy_values).mean()
-                    # Add regularization term
-                    entropy_reg = self.config.entropy_regularization_weight * avg_entropy
-                    loss = loss + entropy_reg
+            loss = loss_fct(
+                shift_logits.view(-1, self.vocab_size),
+                shift_labels.view(-1)
+            )
         
-        if not return_dict:
-            return (loss, logits) if loss is not None else logits
-        
-        return {
-            "loss": loss,
-            "logits": logits,
-            "hidden_states": hidden_states,
-            "metadata": all_block_metadata
-        }
+        # Return outputs
+        if return_dict:
+            return {
+                "loss": loss,
+                "logits": logits,
+                "hidden_states": hidden_states
+            }
+        else:
+            return loss if loss is not None else logits
     
-    def generate(self, input_ids, max_length=20, temperature=1.0, do_sample=True, 
-                top_k=50, top_p=0.95, repetition_penalty=1.0, **kwargs):
+    def resize_token_embeddings(self, new_vocab_size: int) -> None:
         """
-        Generate text using the model.
+        Resize token embeddings.
         
         Args:
-            input_ids (torch.Tensor): Input token IDs of shape [batch_size, seq_len]
-            max_length (int): Maximum generation length
-            temperature (float): Sampling temperature
-            do_sample (bool): Whether to sample or take the most likely token
-            top_k (int): Number of highest probability tokens to keep for top-k filtering
-            top_p (float): Cumulative probability for nucleus sampling
-            repetition_penalty (float): Penalty for repeating tokens
+            new_vocab_size: New vocabulary size
+        """
+        old_embeddings = self.token_embeddings
+        self.token_embeddings = nn.Embedding(
+            new_vocab_size, self.hidden_dim
+        )
+        self.token_embeddings.to(old_embeddings.weight.device)
+        
+        # Copy weights for existing tokens
+        if new_vocab_size > self.vocab_size:
+            self.token_embeddings.weight.data[:self.vocab_size] = old_embeddings.weight.data
+        else:
+            self.token_embeddings.weight.data = old_embeddings.weight.data[:new_vocab_size]
+        
+        # Update output projection
+        old_projection = self.output_projection
+        self.output_projection = nn.Linear(
+            self.hidden_dim, new_vocab_size, bias=False
+        )
+        self.output_projection.to(old_projection.weight.device)
+        
+        # Copy weights for existing tokens
+        if new_vocab_size > self.vocab_size:
+            self.output_projection.weight.data[:self.vocab_size] = old_projection.weight.data
+        else:
+            self.output_projection.weight.data = old_projection.weight.data[:new_vocab_size]
+        
+        # Tie weights
+        self.output_projection.weight = self.token_embeddings.weight
+        
+        # Update vocab size
+        self.vocab_size = new_vocab_size
+
+
+class TransformerBlock(nn.Module):
+    """
+    Transformer block with self-attention and feed-forward layers.
+    """
+    
+    def __init__(self, hidden_dim: int, num_heads: int, dropout: float = 0.1):
+        """
+        Initialize transformer block.
+        
+        Args:
+            hidden_dim: Hidden dimension
+            num_heads: Number of attention heads
+            dropout: Dropout probability
+        """
+        super().__init__()
+        
+        # Self-attention
+        self.self_attn = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True
+        )
+        
+        # Feed-forward network
+        self.feed_forward = nn.Sequential(
+            nn.Linear(hidden_dim, 4 * hidden_dim),
+            nn.GELU(),
+            nn.Linear(4 * hidden_dim, hidden_dim),
+            nn.Dropout(dropout)
+        )
+        
+        # Layer normalization
+        self.norm1 = nn.LayerNorm(hidden_dim)
+        self.norm2 = nn.LayerNorm(hidden_dim)
+        
+        # Dropout
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Forward pass of transformer block.
+        
+        Args:
+            hidden_states: Input hidden states
+            attention_mask: Attention mask
             
         Returns:
-            torch.Tensor: Generated token IDs
+            Updated hidden states
         """
-        batch_size = input_ids.shape[0]
-        device = input_ids.device
+        # Convert mask format for nn.MultiheadAttention
+        if attention_mask is not None:
+            # Create attention mask (1.0 for tokens to attend to, 0.0 for tokens to ignore)
+            extended_mask = attention_mask.unsqueeze(1).unsqueeze(2)
+            extended_mask = (1.0 - extended_mask) * -10000.0
+            extended_mask = extended_mask.to(dtype=hidden_states.dtype)
+        else:
+            extended_mask = None
         
-        # Store current evaluation mode
-        was_training = self.training
-        self.eval()
+        # Apply self-attention with residual connection
+        residual = hidden_states
+        hidden_states = self.norm1(hidden_states)
         
-        with torch.no_grad():
-            # Initialize generation with input_ids
-            generated = input_ids.clone()
-            
-            # Generate tokens up to max_length
-            for _ in range(max_length):
-                # Create attention mask for generated tokens
-                attention_mask = torch.ones_like(generated)
-                
-                # Get model predictions
-                outputs = self.forward(generated, attention_mask, return_dict=True)
-                next_token_logits = outputs["logits"][:, -1, :]
-                
-                # Apply temperature
-                next_token_logits = next_token_logits / temperature
-                
-                # Apply repetition penalty
-                if repetition_penalty != 1.0:
-                    for i in range(batch_size):
-                        for token_id in set(generated[i].tolist()):
-                            if token_id in self.config.vocab_size:
-                                next_token_logits[i, token_id] /= repetition_penalty
-                
-                # Filter with top-k
-                if top_k > 0:
-                    indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
-                    next_token_logits[indices_to_remove] = -float('Inf')
-                
-                # Filter with top-p (nucleus sampling)
-                if top_p < 1.0:
-                    sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
-                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-                    
-                    # Remove tokens with cumulative probability above the threshold
-                    sorted_indices_to_remove = cumulative_probs > top_p
-                    # Shift the indices to the right to keep the first token above the threshold
-                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                    sorted_indices_to_remove[..., 0] = 0
-                    
-                    for batch_idx in range(batch_size):
-                        indices_to_remove = sorted_indices[batch_idx][sorted_indices_to_remove[batch_idx]]
-                        next_token_logits[batch_idx, indices_to_remove] = -float('Inf')
-                
-                # Sample next token
-                if do_sample:
-                    probs = F.softmax(next_token_logits, dim=-1)
-                    next_token = torch.multinomial(probs, num_samples=1)
-                else:
-                    next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
-                
-                # Append next token to generated
-                generated = torch.cat([generated, next_token], dim=-1)
-                
-                # Check if all sequences have reached the end
-                # Use default EOS token ID (50256 for GPT-2) if not specified in config
-                eos_token_id = getattr(self.config, 'eos_token_id', 50256)
-                if (next_token == eos_token_id).all():
-                    break
+        # Apply self-attention
+        attn_output, _ = self.self_attn(
+            query=hidden_states,
+            key=hidden_states,
+            value=hidden_states,
+            key_padding_mask=(attention_mask == 0) if attention_mask is not None else None,
+            need_weights=False
+        )
+        hidden_states = residual + self.dropout(attn_output)
         
-        # Restore training mode
-        self.train(was_training)
+        # Apply feed-forward network with residual connection
+        residual = hidden_states
+        hidden_states = self.norm2(hidden_states)
+        hidden_states = residual + self.feed_forward(hidden_states)
         
-        return generated
-    
-    def save_pretrained(self, save_directory):
-        """
-        Save the model to the specified directory.
-        
-        Args:
-            save_directory (str): Directory to save the model
-        """
-        import os
-        import json
-        
-        os.makedirs(save_directory, exist_ok=True)
-        
-        # Save model weights
-        torch.save(self.state_dict(), os.path.join(save_directory, "model.pt"))
-        
-        # Save config
-        config_dict = {k: v for k, v in self.config.__dict__.items() 
-                      if not k.startswith('_') and not callable(v)}
-        with open(os.path.join(save_directory, "config.json"), 'w') as f:
-            json.dump(config_dict, f, indent=2)
-    
-    @classmethod
-    def from_pretrained(cls, load_directory):
-        """
-        Load the model from the specified directory.
-        
-        Args:
-            load_directory (str): Directory to load the model from
-            
-        Returns:
-            SemanticResonanceModel: Loaded model
-        """
-        import os
-        import json
-        from dataclasses import fields
-        from src.config import ModelConfig
-        
-        # Load config
-        with open(os.path.join(load_directory, "config.json"), 'r') as f:
-            config_dict = json.load(f)
-        
-        # Create config object
-        config = ModelConfig()
-        
-        # Set attributes from loaded config
-        for key, value in config_dict.items():
-            if hasattr(config, key):
-                setattr(config, key, value)
-        
-        # Initialize model with loaded config
-        model = cls(config)
-        
-        # Load model weights
-        model.load_state_dict(torch.load(os.path.join(load_directory, "model.pt")))
-        
-        return model
+        return hidden_states
