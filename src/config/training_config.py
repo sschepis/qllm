@@ -43,6 +43,8 @@ class TrainingConfig:
     eval_steps: int = 0
     save_every_epoch: bool = True
     disable_optimizer_saving: bool = False
+    auto_resume: bool = True  # Automatically resume from latest checkpoint if available
+    ignore_checkpoints: bool = False  # Ignore existing checkpoints and start fresh
     
     # Output directory
     output_dir: str = "runs/quantum_resonance"

@@ -64,6 +64,10 @@ class BaseTrainer:
         self.lr_scheduler = None
         self.dataloaders = {}
         
+        # Training state
+        self.current_epoch = 0
+        self.last_checkpoint_path = None
+        
         # Set device
         self.device = self._get_device()
         self.logger.info(f"Using device: {self.device}")

@@ -1,24 +1,84 @@
 """
-Training package for QLLM.
+Training system for Quantum Resonance Language Models.
 
-This package contains the training functionality for the Quantum Resonance
-Language Model, including various trainer implementations for different
-training approaches (standard, dialogue, verbose).
+This package provides a modular, extensible training system that supports
+various model types, training strategies, and extensions.
 """
 
-# Import the TrainerFactory first since it depends on the trainer implementations
-from src.training.trainer_factory import TrainerFactory
-
-# Import trainer base class and implementations
+# Base trainers
 from src.training.base_trainer import BaseTrainer
+from src.training.enhanced_trainer import EnhancedTrainer
 from src.training.standard_trainer import StandardTrainer
 from src.training.dialogue_trainer import DialogueTrainer
-from src.training.verbose_trainer import VerboseTrainer
+
+# Factory functions
+from src.training.trainer_factory import (
+    get_trainer,
+    create_enhanced_trainer,
+    create_trainer_for_model_type
+)
+
+# Subpackages
+from src.training.model_adapters import (
+    ModelAdapter,
+    StandardModelAdapter,
+    DialogueModelAdapter,
+    MultimodalModelAdapter,
+    get_model_adapter
+)
+
+from src.training.strategies import (
+    TrainingStrategy,
+    StandardTrainingStrategy,
+    FinetuningStrategy,
+    get_training_strategy
+)
+
+from src.training.extensions import (
+    ExtensionHooks,
+    ExtensionManager
+)
+
+from src.training.checkpoints import (
+    CheckpointManager
+)
+
+from src.training.metrics import (
+    MetricsLogger
+)
 
 __all__ = [
-    'TrainerFactory',
+    # Trainers
     'BaseTrainer',
+    'EnhancedTrainer',
     'StandardTrainer',
     'DialogueTrainer',
-    'VerboseTrainer',
+    
+    # Factories
+    'get_trainer',
+    'create_enhanced_trainer',
+    'create_trainer_for_model_type',
+    
+    # Model adapters
+    'ModelAdapter',
+    'StandardModelAdapter',
+    'DialogueModelAdapter',
+    'MultimodalModelAdapter',
+    'get_model_adapter',
+    
+    # Training strategies
+    'TrainingStrategy',
+    'StandardTrainingStrategy',
+    'FinetuningStrategy',
+    'get_training_strategy',
+    
+    # Extensions
+    'ExtensionHooks',
+    'ExtensionManager',
+    
+    # Checkpoints
+    'CheckpointManager',
+    
+    # Metrics
+    'MetricsLogger',
 ]
