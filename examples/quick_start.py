@@ -153,10 +153,10 @@ def quick_start_demo(resume_checkpoint=None):
     
     # Create training configuration
     training_config = TrainingConfig(
-        batch_size=8,      # Small batch size
+        batch_size=32,      # Small batch size
         learning_rate=5e-4,  # Slightly higher for quick convergence
         weight_decay=0.01,
-        max_epochs=10,      # Multiple epochs for better training
+        max_epochs=2,      # Multiple epochs for better training
         warmup_steps=10,
         accumulation_steps=1,
         save_steps=50,      # Save every 50 steps
@@ -178,7 +178,7 @@ def quick_start_demo(resume_checkpoint=None):
     
     # Load a small subset of WikiText
     print("Loading data...")
-    dataset = load_dataset("wikitext", "wikitext-103-raw-v1", split="train[:10000]")
+    dataset = load_dataset("wikitext", "wikitext-103-raw-v1", split="train[:50000]")
     
     # Prepare dataset
     def tokenize_function(examples):
@@ -229,10 +229,12 @@ def quick_start_demo(resume_checkpoint=None):
     if resume_checkpoint:
         start_epoch, global_step, loaded_model_config, loaded_training_config, last_loss = \
             load_training_checkpoint(resume_checkpoint, model, optimizer, device)
+        
         print(f"Resuming from epoch {start_epoch+1}, step {global_step}")
+
         # Optionally update configs with loaded values
-        # model_config = ModelConfig(**loaded_model_config)
-        # training_config = TrainingConfig(**loaded_training_config)
+        model_config = ModelConfig(**loaded_model_config)
+        training_config = TrainingConfig(**loaded_training_config)
         
         # Start from the next epoch
         start_epoch += 1

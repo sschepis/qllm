@@ -10,7 +10,7 @@ import json
 import time
 import logging
 import math
-from typing import Dict, Any, List, Optional, Union, Callable
+from typing import Dict, Any, List, Optional, Union, Callable, Tuple
 from collections import defaultdict
 
 import numpy as np

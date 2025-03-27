@@ -5,6 +5,9 @@ This module defines the core language model with quantum resonance
 principles incorporated into its architecture.
 """
 
+# DEBUG MARKER: THIS FILE HAS THE GENERATE METHOD IMPLEMENTED
+print("DEBUG: Loading modified semantic_resonance_model.py with generate() method...")
+
 import math
 import torch
 import torch.nn as nn
@@ -21,6 +24,9 @@ class SemanticResonanceModel(nn.Module):
     This model implements a transformer-based architecture with
     quantum resonance principles for enhanced semantic understanding.
     """
+    
+    # Debug print to verify this version is being loaded
+    print("Loading SemanticResonanceModel with generate() method...")
     
     def __init__(self, config: ModelConfig):
         """
@@ -240,6 +246,145 @@ class SemanticResonanceModel(nn.Module):
             }
         else:
             return loss if loss is not None else logits
+    
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        max_length: int = 50,
+        temperature: float = 1.0,
+        do_sample: bool = True,
+        top_k: int = 0,
+        top_p: float = 1.0,
+        repetition_penalty: float = 1.0,
+        num_return_sequences: int = 1
+    ) -> torch.Tensor:
+        """
+        Generate text based on input_ids.
+        
+        Args:
+            input_ids: Input token ids
+            max_length: Maximum length of the generated sequence
+            temperature: Temperature for sampling
+            do_sample: Whether to sample from the distribution
+            top_k: Top-k sampling parameter
+            top_p: Top-p (nucleus) sampling parameter
+            repetition_penalty: Penalty for repeating tokens
+            num_return_sequences: Number of sequences to return
+            
+        Returns:
+            Generated token ids
+        """
+        device = input_ids.device
+        batch_size = input_ids.shape[0]
+        
+        # Initialize generated sequences with input_ids
+        generated = input_ids.clone()
+        
+        # Create position ids and attention mask
+        attention_mask = torch.ones_like(generated, device=device)
+        
+        # Continue generating until we reach max_length
+        with torch.no_grad():
+            for _ in range(max_length - generated.shape[1]):
+                # Get model outputs
+                outputs = self.forward(
+                    input_ids=generated,
+                    attention_mask=attention_mask,
+                    return_dict=True
+                )
+                
+                # Get logits for next token (last token in sequence)
+                next_token_logits = outputs["logits"][:, -1, :]
+                
+                # Apply temperature
+                if temperature > 0:
+                    next_token_logits = next_token_logits / temperature
+                
+                # Apply top-k filtering
+                if top_k > 0:
+                    # Keep only the top-k values
+                    top_k_values, top_k_indices = torch.topk(next_token_logits, top_k, dim=-1)
+                    
+                    # Create a mask of values to keep
+                    filter_mask = torch.zeros_like(next_token_logits, device=device)
+                    filter_mask.scatter_(1, top_k_indices, 1.0)
+                    
+                    # Apply the mask (set remaining values to -inf)
+                    next_token_logits = torch.where(
+                        filter_mask > 0,
+                        next_token_logits,
+                        torch.full_like(next_token_logits, float('-inf'))
+                    )
+                
+                # Apply top-p (nucleus) filtering
+                if top_p < 1.0:
+                    # Sort logits and corresponding indices
+                    sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
+                    
+                    # Compute cumulative probabilities
+                    sorted_probs = torch.softmax(sorted_logits, dim=-1)
+                    cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+                    
+                    # Remove tokens with cumulative probability above the threshold
+                    sorted_indices_to_remove = cumulative_probs > top_p
+                    
+                    # Shift the indices to the right to keep the first token above threshold
+                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                    sorted_indices_to_remove[..., 0] = 0
+                    
+                    # Create a scatter mask and apply it
+                    indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                    next_token_logits = torch.where(
+                        indices_to_remove,
+                        torch.full_like(next_token_logits, float('-inf')),
+                        next_token_logits
+                    )
+                
+                # Sample from the filtered distribution
+                if do_sample:
+                    # Apply softmax to convert logits to probabilities
+                    probs = torch.softmax(next_token_logits, dim=-1)
+                    
+                    # Sample from the distribution
+                    next_tokens = torch.multinomial(probs, num_samples=1)
+                else:
+                    # Take the token with the highest probability
+                    next_tokens = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+                
+                # Append the new token to the sequence
+                generated = torch.cat([generated, next_tokens], dim=1)
+                
+                # Update attention mask
+                attention_mask = torch.cat([
+                    attention_mask,
+                    torch.ones((batch_size, 1), device=device)
+                ], dim=1)
+                
+        return generated
+    
+    def save_pretrained(self, save_directory: str) -> None:
+        """
+        Save the model and its configuration.
+        
+        Args:
+            save_directory: Directory to save the model to
+        """
+        import os
+        import json
+        
+        # Create directory if it doesn't exist
+        os.makedirs(save_directory, exist_ok=True)
+        
+        # Save model weights
+        model_path = os.path.join(save_directory, "pytorch_model.bin")
+        torch.save(self.state_dict(), model_path)
+        
+        # Save configuration
+        config_path = os.path.join(save_directory, "config.json")
+        with open(config_path, "w") as f:
+            json.dump(self.config.to_dict(), f, indent=2)
+        
+        print(f"Model saved to {save_directory}")
     
     def resize_token_embeddings(self, new_vocab_size: int) -> None:
         """
