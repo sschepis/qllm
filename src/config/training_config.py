@@ -46,6 +46,7 @@ class TrainingConfig:
     
     # Output directory
     output_dir: str = "runs/quantum_resonance"
+    checkpoint_dir: Optional[str] = None  # For backward compatibility with quick_start.py
     
     # Reproducibility
     seed: int = 42

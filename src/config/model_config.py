@@ -26,6 +26,13 @@ class ModelConfig:
     max_iterations: int = 10
     entropy_threshold: float = 0.01
     phase_factor: float = 0.5
+    base_dim: int = 768
+    use_prime_mask: bool = True
+    
+    # HCW (Self-Evolving Memory) settings
+    memory_size: int = 1000
+    memory_key_dim: int = 128
+    enable_hcw: bool = True
     
     # Extensions configuration
     extensions: Dict[str, Any] = field(default_factory=dict)
