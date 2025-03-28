@@ -968,6 +968,29 @@ class TrainerCore:
         """
         return self.scheduler.get_last_lr()[0]
     
+    @property
+    def output_dir(self) -> str:
+        """
+        Get the output directory for training artifacts.
+        
+        Returns:
+            Output directory path
+        """
+        # Try to get from config
+        if hasattr(self.config, "output_dir"):
+            return self.config.output_dir
+        
+        # Try to get from checkpoint manager
+        if self.checkpoint_manager and hasattr(self.checkpoint_manager, "output_dir"):
+            return self.checkpoint_manager.output_dir
+        
+        # Try to get from metrics logger
+        if self.metrics_logger and hasattr(self.metrics_logger, "log_dir"):
+            return self.metrics_logger.log_dir
+        
+        # Default fallback
+        return os.path.join("runs", "quantum_resonance")
+    
     def evaluate(self, dataloader: Optional[DataLoader] = None, split: str = "val") -> Dict[str, float]:
         """
         Evaluate the model on a dataset.
