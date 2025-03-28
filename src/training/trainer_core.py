@@ -498,17 +498,16 @@ class TrainerCore:
             
             # Optimizer step on gradient accumulation boundaries
             if (step + 1) % accumulation_steps == 0:
-                # Calculate gradient norm for metrics
-                if self.config.optimization.max_grad_norm > 0:
-                    grad_norm = self._get_grad_norm()
-                    epoch_metrics["grad_norm"] += grad_norm
-                
-                # Apply gradients
-                apply_gradients(
+                # Apply gradients with gradient norm calculation included
+                grad_norm = apply_gradients(
                     optimizer=self.optimizer,
                     grad_scaler=self.grad_scaler,
                     max_grad_norm=self.config.optimization.max_grad_norm
                 )
+                
+                # Record gradient norm for metrics
+                if self.config.optimization.max_grad_norm > 0:
+                    epoch_metrics["grad_norm"] += grad_norm
                 
                 # Update learning rate
                 self.scheduler.step()

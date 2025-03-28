@@ -412,18 +412,37 @@ def apply_gradients(
     
     # Clip gradients if max_grad_norm is specified
     if max_grad_norm > 0:
-        if grad_scaler is not None and hasattr(grad_scaler, "unscale_"):
-            # Unscale gradients for accurate clipping with AMP
-            grad_scaler.unscale_(optimizer)
-        
-        # Compute gradient norm for all parameters
-        parameters = []
-        for param_group in optimizer.param_groups:
-            parameters.extend([p for p in param_group['params'] if p.grad is not None])
-        
-        if parameters:
-            # Clip gradients in-place
-            grad_norm = torch.nn.utils.clip_grad_norm_(parameters, max_grad_norm).item()
+        try:
+            # Check if unscaling needed for gradient clipping with AMP
+            should_unscale = grad_scaler is not None and hasattr(grad_scaler, "unscale_")
+            
+            if should_unscale:
+                try:
+                    # Try to unscale, but handle if already unscaled
+                    grad_scaler.unscale_(optimizer)
+                except RuntimeError as e:
+                    # If error indicates already unscaled, we can proceed with clipping
+                    error_msg = str(e)
+                    if "unscale_() has already been called" in error_msg:
+                        # Already unscaled, we can continue
+                        pass
+                    else:
+                        # Some other error, re-raise
+                        raise
+            
+            # Compute gradient norm for all parameters
+            parameters = []
+            for param_group in optimizer.param_groups:
+                parameters.extend([p for p in param_group['params'] if p.grad is not None])
+            
+            if parameters:
+                # Clip gradients in-place
+                grad_norm = torch.nn.utils.clip_grad_norm_(parameters, max_grad_norm).item()
+        except Exception as e:
+            # If anything goes wrong during clipping/unscaling, log and continue
+            import logging
+            logger = logging.getLogger("quantum_resonance")
+            logger.error(f"Error during gradient clipping/unscaling: {e}, will attempt to continue")
     
     # Apply gradients
     try:
