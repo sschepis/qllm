@@ -176,9 +176,26 @@ def create_training_strategy(
         if strategy_type == "standard":
             strategy_type = config.get("training_strategy", "standard")
     elif isinstance(config, EnhancedTrainingConfig):
-        strategy_type = config.training_strategy.strategy_type
+        # Handle both object and string cases for training_strategy
+        if isinstance(config.training_strategy, str):
+            strategy_type = config.training_strategy
+        else:
+            # It's an object with attributes
+            try:
+                strategy_type = config.training_strategy.strategy_type
+            except AttributeError:
+                logger.warning("training_strategy object missing strategy_type attribute, using default")
+                strategy_type = "standard"
     else:  # Handle legacy TrainingConfig
-        strategy_type = getattr(config, "training_strategy", "standard")
+        strategy_value = getattr(config, "training_strategy", "standard")
+        # Handle both string and object cases
+        if isinstance(strategy_value, str):
+            strategy_type = strategy_value
+        else:
+            try:
+                strategy_type = strategy_value.strategy_type
+            except AttributeError:
+                strategy_type = "standard"
     
     strategy_type = strategy_type.lower()
     
