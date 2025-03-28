@@ -1,402 +1,387 @@
 """
-Enhanced Semantic Resonance Language Model with Extensions.
+Extended Semantic Resonance Model with support for extensions.
 
-This module extends the original Semantic Resonance Model with the extension
-framework, supporting multimodal processing, extended memory, and quantum
-group symmetries.
+This module provides an extended version of the SemanticResonanceModel
+that supports various extensions including multimodal, memory, and quantum
+enhancements. It has been refactored to reduce code duplication.
 """
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import Dict, Any, Optional, List, Tuple, Union
+from typing import Dict, Any, Optional, List, Tuple, Union, Type, Callable
 
-from .semantic_resonance_model import SemanticResonanceModel
-from .extensions.extension_config import ExtensionConfig
-from .extensions.extension_manager import ExtensionManager
-from .extensions.multimodal.vision_extension import VisionExtension
-from .extensions.memory.knowledge_graph_extension import KnowledgeGraphExtension
-from .extensions.quantum.symmetry_mask_extension import SymmetryMaskExtension
+from src.model.semantic_resonance_model import SemanticResonanceModel
+from src.config.model_config import ModelConfig
 
 
-class EnhancedSemanticResonanceModel(SemanticResonanceModel):
+class SemanticResonanceModelWithExtensions(SemanticResonanceModel):
     """
-    Enhanced Semantic Resonance Language Model with extensions.
+    Semantic Resonance Model with extension support.
     
-    This class extends the original Semantic Resonance Model to incorporate
-    the extension framework, enabling multimodal processing, extended memory,
-    and quantum group symmetries.
+    This model extends the base SemanticResonanceModel to add support for
+    various extensions that enhance the model's capabilities. It supports:
+    - Memory extensions for improved long-term context
+    - Multimodal extensions for handling different modalities
+    - Quantum extensions for quantum computing integration
     """
     
-    def __init__(self, config, extension_config=None):
+    def __init__(self, config: Union[ModelConfig, Dict[str, Any]]):
         """
-        Initialize the Enhanced Semantic Resonance Model.
+        Initialize the model with extensions.
         
         Args:
-            config: Configuration object with model parameters
-            extension_config (ExtensionConfig, optional): Configuration for extensions
+            config: Model configuration as ModelConfig object or dictionary
         """
-        # Initialize the base model
+        # Convert dict to ModelConfig if needed
+        if isinstance(config, dict):
+            config = ModelConfig.from_dict(config)
+        
+        # Call parent constructor
         super().__init__(config)
         
-        # Initialize extension framework
-        self.initialize_extensions(extension_config)
+        # Extension registry for dynamically loaded extensions
+        self.extensions = {}
+        
+        # Set up extensions based on configuration
+        self.extensions_enabled = True
+        self._setup_extensions()
     
-    def initialize_extensions(self, extension_config=None):
-        """
-        Initialize the extension framework.
+    def _setup_extensions(self) -> None:
+        """Set up model extensions based on configuration."""
+        # Set up memory extension
+        if self.config.has_extension("memory"):
+            self._setup_memory_extension()
         
-        Args:
-            extension_config (ExtensionConfig, optional): Configuration for extensions
-        """
-        # Create default extension config if not provided
-        if extension_config is None:
-            extension_config = ExtensionConfig()
+        # Set up multimodal extension
+        if self.config.has_extension("multimodal"):
+            self._setup_multimodal_extension()
         
-        # Store extension config
-        self.extension_config = extension_config
+        # Set up quantum extension
+        if self.config.has_extension("quantum"):
+            self._setup_quantum_extension()
         
-        # Create extension manager
-        self.extension_manager = ExtensionManager(extension_config, self)
-        
-        # Register default extensions if enabled
-        if extension_config.extensions_enabled:
-            self.register_default_extensions()
+        # Set up additional extensions
+        extension_config = getattr(self.config, "extensions", {})
+        if isinstance(extension_config, dict):
+            for ext_name, ext_config in extension_config.items():
+                if ext_config.get("enabled", False) and ext_name not in ["memory", "multimodal", "quantum"]:
+                    self._setup_custom_extension(ext_name, ext_config)
     
-    def register_default_extensions(self):
-        """Register the default extensions based on configuration."""
-        # Register multimodal extension if enabled
-        if self.extension_config.multimodal.enabled:
-            vision_extension = VisionExtension(
-                name="vision",
-                config=self.extension_config.multimodal.__dict__
-            )
-            self.extension_manager.register_extension(vision_extension)
-        
-        # Register memory extension if enabled
-        if self.extension_config.memory.enabled:
-            memory_extension = KnowledgeGraphExtension(
-                name="knowledge_graph",
-                config=self.extension_config.memory.__dict__
-            )
-            self.extension_manager.register_extension(memory_extension)
-        
-        # Register quantum extension if enabled
-        if self.extension_config.quantum.enabled:
-            quantum_extension = SymmetryMaskExtension(
-                name="symmetry_mask",
-                config=self.extension_config.quantum.__dict__
-            )
-            self.extension_manager.register_extension(quantum_extension)
-    
-    def register_extension(self, extension):
-        """
-        Register a custom extension with the model.
-        
-        Args:
-            extension: Extension to register
-        """
-        self.extension_manager.register_extension(extension)
-    
-    def set_extension_order(self, order):
-        """
-        Set the execution order for extensions.
-        
-        Args:
-            order: List of (type, name) tuples defining execution order
-        """
-        self.extension_manager.set_extension_order(order)
-    
-    def enable_extension(self, ext_type, ext_name):
-        """
-        Enable a specific extension.
-        
-        Args:
-            ext_type: Type of the extension
-            ext_name: Name of the extension
-        """
-        self.extension_manager.enable_extension(ext_type, ext_name)
-    
-    def disable_extension(self, ext_type, ext_name):
-        """
-        Disable a specific extension.
-        
-        Args:
-            ext_type: Type of the extension
-            ext_name: Name of the extension
-        """
-        self.extension_manager.disable_extension(ext_type, ext_name)
-    
-    def get_extension(self, ext_type, ext_name):
-        """
-        Get a registered extension by type and name.
-        
-        Args:
-            ext_type: Type of the extension
-            ext_name: Name of the extension
+    def _setup_memory_extension(self) -> None:
+        """Set up memory extension."""
+        try:
+            # Import memory extension
+            from src.model.extensions.memory import MemoryExtension
             
-        Returns:
-            The extension if found, None otherwise
-        """
-        return self.extension_manager.get_extension(ext_type, ext_name)
+            # Get memory configuration
+            memory_config = self.config.get_extension_config("memory")
+            
+            # Create memory extension
+            memory_extension = MemoryExtension(
+                model=self,
+                hidden_dim=self.hidden_dim,
+                config=memory_config
+            )
+            
+            # Register memory extension
+            self.memory_extension = memory_extension
+            self.extensions["memory"] = memory_extension
+            
+            print(f"Memory extension enabled: {memory_config}")
+        except (ImportError, ModuleNotFoundError) as e:
+            print(f"Error loading memory extension: {e}")
+            self.memory_extension = None
     
-    def forward(self, 
-                input_ids, 
-                attention_mask=None, 
-                positions=None, 
-                labels=None, 
-                return_dict=True,
-                **extension_inputs):
+    def _setup_multimodal_extension(self) -> None:
+        """Set up multimodal extension."""
+        try:
+            # Import multimodal extension
+            from src.model.extensions.multimodal import MultimodalExtension
+            
+            # Get multimodal configuration
+            multimodal_config = self.config.get_extension_config("multimodal")
+            
+            # Create multimodal extension
+            multimodal_extension = MultimodalExtension(
+                model=self,
+                hidden_dim=self.hidden_dim,
+                config=multimodal_config
+            )
+            
+            # Register multimodal extension
+            self.multimodal_extension = multimodal_extension
+            self.extensions["multimodal"] = multimodal_extension
+            
+            print(f"Multimodal extension enabled: {multimodal_config}")
+        except (ImportError, ModuleNotFoundError) as e:
+            print(f"Error loading multimodal extension: {e}")
+            self.multimodal_extension = None
+    
+    def _setup_quantum_extension(self) -> None:
+        """Set up quantum extension."""
+        try:
+            # Import quantum extension
+            from src.model.extensions.quantum import QuantumExtension
+            
+            # Get quantum configuration
+            quantum_config = self.config.get_extension_config("quantum")
+            
+            # Create quantum extension
+            quantum_extension = QuantumExtension(
+                model=self,
+                hidden_dim=self.hidden_dim,
+                config=quantum_config
+            )
+            
+            # Register quantum extension
+            self.quantum_extension = quantum_extension
+            self.extensions["quantum"] = quantum_extension
+            
+            print(f"Quantum extension enabled: {quantum_config}")
+        except (ImportError, ModuleNotFoundError) as e:
+            print(f"Error loading quantum extension: {e}")
+            self.quantum_extension = None
+    
+    def _setup_custom_extension(self, ext_name: str, ext_config: Dict[str, Any]) -> None:
+        """
+        Set up a custom extension.
+        
+        Args:
+            ext_name: Name of the extension
+            ext_config: Extension configuration
+        """
+        try:
+            # Import extension class from the specified module
+            module_path = ext_config.get("module", f"src.model.extensions.{ext_name}")
+            class_name = ext_config.get("class", f"{ext_name.capitalize()}Extension")
+            
+            # Dynamically import the extension class
+            import importlib
+            module = importlib.import_module(module_path)
+            extension_class = getattr(module, class_name)
+            
+            # Create extension instance
+            extension = extension_class(
+                model=self,
+                hidden_dim=self.hidden_dim,
+                config=ext_config
+            )
+            
+            # Register extension
+            self.extensions[ext_name] = extension
+            setattr(self, f"{ext_name}_extension", extension)
+            
+            print(f"Custom extension '{ext_name}' enabled: {ext_config}")
+        except (ImportError, ModuleNotFoundError, AttributeError) as e:
+            print(f"Error loading custom extension '{ext_name}': {e}")
+    
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        return_dict: bool = True,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
+        return_metadata: bool = False,
+        extension_kwargs: Optional[Dict[str, Any]] = None,
+        **kwargs
+    ) -> Dict[str, torch.Tensor]:
         """
         Forward pass with extension support.
         
         Args:
-            input_ids: Token IDs of shape [batch_size, seq_len]
-            attention_mask: Attention mask of shape [batch_size, seq_len]
-            positions: Position indices. If None, uses default positions.
-            labels: Target token IDs for language modeling
-            return_dict: Whether to return outputs as a dictionary
-            **extension_inputs: Additional inputs for extensions
+            input_ids: Token IDs
+            attention_mask: Attention mask
+            position_ids: Position IDs
+            labels: Labels for computing loss
+            return_dict: Whether to return output as dictionary
+            output_attentions: Whether to return attention weights
+            output_hidden_states: Whether to return all hidden states
+            return_metadata: Whether to return metadata from layers
+            extension_kwargs: Additional keyword arguments for extensions
+            **kwargs: Additional keyword arguments
             
         Returns:
-            Model outputs, either as logits tensor or as dictionary
+            Model outputs
         """
-        # Create a dictionary to store model outputs
-        model_outputs = {}
+        # Initialize extension inputs
+        ext_inputs = {}
         
-        # Include extension inputs in model outputs
-        for key, value in extension_inputs.items():
-            model_outputs[key] = value
+        # Process extension inputs for multimodal
+        if self.multimodal_extension is not None and extension_kwargs:
+            # Extract multimodal inputs (images, audio, etc.)
+            multimodal_inputs = extension_kwargs.get("multimodal", {})
+            ext_inputs["multimodal"] = multimodal_inputs
         
-        # Run the base model's forward pass
-        base_outputs = super().forward(
+        # Process memory extension
+        if self.memory_extension is not None and extension_kwargs:
+            memory_kwargs = extension_kwargs.get("memory", {})
+            ext_inputs["memory"] = memory_kwargs
+        
+        # Process quantum extension
+        if self.quantum_extension is not None and extension_kwargs:
+            quantum_kwargs = extension_kwargs.get("quantum", {})
+            ext_inputs["quantum"] = quantum_kwargs
+        
+        # Process other extensions
+        for ext_name, extension in self.extensions.items():
+            if ext_name not in ["multimodal", "memory", "quantum"] and extension_kwargs:
+                ext_inputs[ext_name] = extension_kwargs.get(ext_name, {})
+        
+        # Apply extensions pre-forward hooks
+        for ext_name, extension in self.extensions.items():
+            if hasattr(extension, "pre_forward"):
+                # Apply pre-forward hook for the extension
+                input_ids, attention_mask, position_ids, kwargs = extension.pre_forward(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    ext_inputs=ext_inputs.get(ext_name, {}),
+                    **kwargs
+                )
+        
+        # Call parent forward method
+        outputs = super().forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            positions=positions,
+            position_ids=position_ids,
             labels=labels,
-            return_dict=True
+            return_dict=True,  # Always use dict for extensions
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_metadata=return_metadata,
+            **kwargs
         )
         
-        # Add base outputs to model outputs
-        for key, value in base_outputs.items():
-            model_outputs[key] = value
+        # Apply extensions post-forward hooks
+        for ext_name, extension in self.extensions.items():
+            if hasattr(extension, "post_forward"):
+                # Apply post-forward hook for the extension
+                outputs = extension.post_forward(
+                    outputs=outputs,
+                    ext_inputs=ext_inputs.get(ext_name, {})
+                )
         
-        # Process through extensions if enabled
-        if hasattr(self, 'extension_manager') and self.extension_config.extensions_enabled:
-            # Get the hidden states
-            hidden_states = base_outputs["hidden_states"]
-            
-            # Process through extensions
-            enhanced_hidden_states, extension_outputs = self.extension_manager.process_extensions(
-                hidden_states, model_outputs
-            )
-            
-            # Update hidden states and add extension outputs
-            model_outputs["hidden_states"] = enhanced_hidden_states
-            model_outputs["extension_outputs"] = extension_outputs
-            
-            # If the hidden states were modified and logits should be updated
-            if not torch.equal(enhanced_hidden_states, hidden_states):
-                # Recompute logits using the pre-manifest layer
-                new_logits, final_metadata = self.pre_manifest(enhanced_hidden_states, attention_mask)
-                model_outputs["logits"] = new_logits
-                model_outputs["metadata"]["pre_manifest_recomputed"] = final_metadata
-                
-                # Recompute loss if labels are provided
-                if labels is not None:
-                    # Shift logits and labels for next token prediction
-                    shift_logits = new_logits[..., :-1, :].contiguous()
-                    shift_labels = labels[..., 1:].contiguous()
-                    
-                    # Flatten the shifted tensors
-                    shift_logits = shift_logits.view(-1, self.config.vocab_size)
-                    shift_labels = shift_labels.view(-1)
-                    
-                    # Compute cross entropy loss
-                    loss_fct = nn.CrossEntropyLoss()
-                    new_loss = loss_fct(shift_logits, shift_labels)
-                    model_outputs["loss"] = new_loss
-        
-        # Return appropriate output format
+        # Return outputs in the requested format
         if not return_dict:
-            if "loss" in model_outputs:
-                return (model_outputs["loss"], model_outputs["logits"])
-            return model_outputs["logits"]
+            return outputs.get("loss", None) if labels is not None else outputs.get("logits", None)
         
-        return model_outputs
+        return outputs
     
-    def generate(self, 
-                input_ids, 
-                max_length=20, 
-                temperature=1.0, 
-                do_sample=True,
-                top_k=50, 
-                top_p=0.95, 
-                repetition_penalty=1.0, 
-                **extension_inputs):
+    def generate(
+        self,
+        input_ids: Union[torch.Tensor, str],
+        attention_mask: Optional[torch.Tensor] = None,
+        extension_kwargs: Optional[Dict[str, Any]] = None,
+        **kwargs
+    ) -> Union[torch.Tensor, str]:
         """
         Generate text with extension support.
         
         Args:
-            input_ids: Input token IDs of shape [batch_size, seq_len]
-            max_length: Maximum generation length
-            temperature: Sampling temperature
-            do_sample: Whether to sample or take the most likely token
-            top_k: Number of highest probability tokens for top-k filtering
-            top_p: Cumulative probability for nucleus sampling
-            repetition_penalty: Penalty for repeating tokens
-            **extension_inputs: Additional inputs for extensions
+            input_ids: Input token IDs or text string
+            attention_mask: Attention mask
+            extension_kwargs: Additional keyword arguments for extensions
+            **kwargs: Additional generation parameters
             
         Returns:
-            Generated token IDs
+            Generated token IDs or text
         """
-        batch_size = input_ids.shape[0]
-        device = input_ids.device
+        # Initialize extension inputs
+        ext_inputs = {}
+        if extension_kwargs:
+            ext_inputs = extension_kwargs
         
-        # Store current evaluation mode
-        was_training = self.training
-        self.eval()
-        
-        with torch.no_grad():
-            # Initialize generation with input_ids
-            generated = input_ids.clone()
-            
-            # Generate tokens up to max_length
-            for _ in range(max_length):
-                # Create attention mask for generated tokens
-                attention_mask = torch.ones_like(generated)
-                
-                # Get model predictions with extension support
-                outputs = self.forward(
-                    generated, 
-                    attention_mask,
-                    return_dict=True,
-                    **extension_inputs
+        # Apply extensions pre-generate hooks
+        for ext_name, extension in self.extensions.items():
+            if hasattr(extension, "pre_generate"):
+                # Apply pre-generate hook for the extension
+                input_ids, attention_mask, kwargs = extension.pre_generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    ext_inputs=ext_inputs.get(ext_name, {}),
+                    **kwargs
                 )
-                next_token_logits = outputs["logits"][:, -1, :]
-                
-                # Apply temperature
-                next_token_logits = next_token_logits / temperature
-                
-                # Apply repetition penalty
-                if repetition_penalty != 1.0:
-                    for i in range(batch_size):
-                        for token_id in set(generated[i].tolist()):
-                            if token_id < self.config.vocab_size:
-                                next_token_logits[i, token_id] /= repetition_penalty
-                
-                # Filter with top-k
-                if top_k > 0:
-                    indices_to_remove = next_token_logits < torch.topk(next_token_logits, top_k)[0][..., -1, None]
-                    next_token_logits[indices_to_remove] = -float('Inf')
-                
-                # Filter with top-p (nucleus sampling)
-                if top_p < 1.0:
-                    sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
-                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-                    
-                    # Remove tokens with cumulative probability above the threshold
-                    sorted_indices_to_remove = cumulative_probs > top_p
-                    # Shift the indices to the right to keep the first token above the threshold
-                    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                    sorted_indices_to_remove[..., 0] = 0
-                    
-                    for batch_idx in range(batch_size):
-                        indices_to_remove = sorted_indices[batch_idx][sorted_indices_to_remove[batch_idx]]
-                        next_token_logits[batch_idx, indices_to_remove] = -float('Inf')
-                
-                # Sample next token
-                if do_sample:
-                    probs = F.softmax(next_token_logits, dim=-1)
-                    next_token = torch.multinomial(probs, num_samples=1)
-                else:
-                    next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
-                
-                # Append next token to generated
-                generated = torch.cat([generated, next_token], dim=-1)
-                
-                # Update extension inputs if needed
-                for ext_type, ext_dict in outputs.get("extension_outputs", {}).items():
-                    for ext_name, ext_output in ext_dict.items():
-                        # Pass relevant extension outputs as inputs to the next iteration
-                        if isinstance(ext_output, dict) and "state" in ext_output:
-                            extension_inputs[f"{ext_type}.{ext_name}.state"] = ext_output["state"]
-                
-                # Check if all sequences have reached the end
-                # Use default EOS token ID (50256 for GPT-2) if not specified in config
-                eos_token_id = getattr(self.config, 'eos_token_id', 50256)
-                if (next_token == eos_token_id).all():
-                    break
         
-        # Restore training mode
-        self.train(was_training)
+        # Call parent generate method
+        outputs = super().generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            **kwargs
+        )
         
-        return generated
+        # Apply extensions post-generate hooks
+        for ext_name, extension in self.extensions.items():
+            if hasattr(extension, "post_generate"):
+                # Apply post-generate hook for the extension
+                outputs = extension.post_generate(
+                    outputs=outputs,
+                    ext_inputs=ext_inputs.get(ext_name, {}),
+                    **kwargs
+                )
+        
+        return outputs
     
-    def save_pretrained(self, save_directory):
+    def add_extension(self, name: str, extension: Any) -> None:
         """
-        Save the model and extensions to the specified directory.
+        Add a new extension to the model.
         
         Args:
-            save_directory: Directory to save the model
+            name: Name of the extension
+            extension: Extension object
         """
-        import os
-        import json
+        self.extensions[name] = extension
+        setattr(self, f"{name}_extension", extension)
         
-        # Save base model
-        super().save_pretrained(save_directory)
+        # Update the config to include the new extension
+        if not hasattr(self.config, "extensions"):
+            self.config.extensions = {}
         
-        # Save extension configuration
-        if hasattr(self, 'extension_config'):
-            ext_config_path = os.path.join(save_directory, "extension_config.json")
-            with open(ext_config_path, 'w') as f:
-                json.dump(self.extension_config.to_dict(), f, indent=2)
-        
-        # Save extension states if available
-        if hasattr(self, 'extension_manager'):
-            ext_states_dir = os.path.join(save_directory, "extension_states")
-            os.makedirs(ext_states_dir, exist_ok=True)
-            self.extension_manager.save_state(os.path.join(ext_states_dir, "extensions.pt"))
+        self.config.extensions[name] = {"enabled": True}
     
-    @classmethod
-    def from_pretrained(cls, load_directory):
+    def remove_extension(self, name: str) -> bool:
         """
-        Load the model and extensions from the specified directory.
+        Remove an extension from the model.
         
         Args:
-            load_directory: Directory to load the model from
+            name: Name of the extension
             
         Returns:
-            EnhancedSemanticResonanceModel: Loaded model
+            True if extension was removed, False if not found
         """
-        import os
-        import json
-        from .extensions.extension_config import ExtensionConfig
+        if name in self.extensions:
+            # Get the extension
+            extension = self.extensions[name]
+            
+            # Call cleanup if available
+            if hasattr(extension, "cleanup"):
+                extension.cleanup()
+            
+            # Remove from extensions dict
+            del self.extensions[name]
+            
+            # Remove attribute if it exists
+            if hasattr(self, f"{name}_extension"):
+                delattr(self, f"{name}_extension")
+            
+            # Update config
+            if hasattr(self.config, "extensions") and name in self.config.extensions:
+                self.config.extensions[name]["enabled"] = False
+            
+            return True
         
-        # Load base model
-        model = super().from_pretrained(load_directory)
+        return False
+    
+    def get_extension(self, name: str) -> Optional[Any]:
+        """
+        Get an extension by name.
         
-        # Convert to enhanced model if needed
-        if not isinstance(model, cls):
-            # Create enhanced model from base model
-            enhanced_model = cls(model.config)
-            enhanced_model.load_state_dict(model.state_dict())
-            model = enhanced_model
-        
-        # Load extension configuration if available
-        ext_config_path = os.path.join(load_directory, "extension_config.json")
-        if os.path.exists(ext_config_path):
-            with open(ext_config_path, 'r') as f:
-                ext_config_dict = json.load(f)
-            ext_config = ExtensionConfig.from_dict(ext_config_dict)
-            model.initialize_extensions(ext_config)
-        
-        # Load extension states if available
-        ext_states_path = os.path.join(load_directory, "extension_states", "extensions.pt")
-        if os.path.exists(ext_states_path) and hasattr(model, 'extension_manager'):
-            model.extension_manager.load_state(ext_states_path)
-        
-        return model
-
-# Alias for backward compatibility
-SemanticResonanceModelWithExtensions = EnhancedSemanticResonanceModel
+        Args:
+            name: Name of the extension
+            
+        Returns:
+            Extension object or None if not found
+        """
+        return self.extensions.get(name)

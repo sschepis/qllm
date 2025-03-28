@@ -1,544 +1,446 @@
 """
-Evaluation Metrics for QLLM Extensions.
+Centralized metrics utilities for QLLM evaluation.
 
-This module provides metrics for evaluating the performance, efficiency,
-and quality of QLLM models and extensions.
+This module provides utilities for managing, registering, and computing
+metrics for model evaluation, centralizing functionality that was previously
+duplicated across different metrics implementations.
 """
 
-import time
+import os
+import json
+import logging
+import importlib
+from typing import Dict, Any, List, Tuple, Union, Optional, Callable
+
 import torch
 import numpy as np
-from typing import Dict, List, Any, Optional, Tuple, Union
-
-import psutil
-import torch.nn.functional as F
-from nltk.translate.bleu_score import sentence_bleu
-from nltk.tokenize import word_tokenize
 
 
-def perplexity(
-    model: torch.nn.Module,
-    text: str,
-    stride: int = 512,
-    max_length: int = 1024
-) -> float:
+logger = logging.getLogger("qllm.evaluation")
+
+
+# Global registry of metrics
+_METRICS_REGISTRY: Dict[str, Callable] = {}
+
+
+def register_metric(name: str, metric_fn: Callable) -> None:
     """
-    Calculate perplexity for a given text.
+    Register a metric function in the global registry.
     
     Args:
-        model: The model to evaluate
-        text: Input text
-        stride: Stride length for processing long texts
-        max_length: Maximum sequence length
-        
-    Returns:
-        Perplexity value
+        name: Name of the metric
+        metric_fn: Function implementing the metric
     """
-    # Ensure model is in evaluation mode
-    model.eval()
+    if name in _METRICS_REGISTRY:
+        logger.warning(f"Overwriting existing metric: {name}")
     
-    # Tokenize input text
-    tokenizer = model.tokenizer
-    encodings = tokenizer(text, return_tensors="pt")
+    _METRICS_REGISTRY[name] = metric_fn
+    logger.debug(f"Registered metric: {name}")
+
+
+def get_metric_registry() -> Dict[str, Callable]:
+    """
+    Get the global metrics registry.
     
-    # Initialize variables for perplexity calculation
-    nlls = []
-    device = next(model.parameters()).device
+    Returns:
+        Dictionary mapping metric names to metric functions
+    """
+    # Populate registry if it's empty
+    if not _METRICS_REGISTRY:
+        _populate_registry()
     
-    # Process text in chunks for long sequences
-    for i in range(0, encodings.input_ids.size(1), stride):
-        begin_loc = max(i + stride - max_length, 0)
-        end_loc = min(i + stride, encodings.input_ids.size(1))
-        input_ids = encodings.input_ids[:, begin_loc:end_loc].to(device)
-        target_ids = input_ids.clone()
+    return _METRICS_REGISTRY
+
+
+def _populate_registry() -> None:
+    """
+    Populate the metrics registry with all available metrics.
+    """
+    # Import all metric categories to register their metrics
+    try:
+        # Import general metrics
+        from src.evaluation.metrics.general import (
+            perplexity, 
+            accuracy, 
+            f1_score,
+            bleu_score,
+            rouge_score
+        )
         
-        with torch.no_grad():
-            outputs = model(input_ids=input_ids)
-            logits = outputs["logits"] if isinstance(outputs, dict) else outputs
+        # Register general metrics
+        register_metric("perplexity", perplexity)
+        register_metric("accuracy", accuracy)
+        register_metric("f1_score", f1_score)
+        register_metric("bleu_score", bleu_score)
+        register_metric("rouge_score", rouge_score)
+        
+        # Import and register compositional metrics
+        from src.evaluation.metrics.compositional import (
+            compositional_accuracy,
+            structural_consistency,
+            tree_validity
+        )
+        
+        register_metric("compositional_accuracy", compositional_accuracy)
+        register_metric("structural_consistency", structural_consistency)
+        register_metric("tree_validity", tree_validity)
+        
+        # Import and register emergent metrics
+        from src.evaluation.metrics.emergent import (
+            emergence_score,
+            pattern_recognition,
+            abstraction_level
+        )
+        
+        register_metric("emergence_score", emergence_score)
+        register_metric("pattern_recognition", pattern_recognition)
+        register_metric("abstraction_level", abstraction_level)
+        
+        # Import and register memory metrics
+        from src.evaluation.metrics.memory import (
+            context_retention,
+            long_range_dependency,
+            information_retrieval
+        )
+        
+        register_metric("context_retention", context_retention)
+        register_metric("long_range_dependency", long_range_dependency)
+        register_metric("information_retrieval", information_retrieval)
+        
+        # Import and register multimodal metrics if available
+        try:
+            from src.evaluation.metrics.multimodal import (
+                image_text_alignment,
+                cross_modal_coherence,
+                multimodal_inference
+            )
             
-            # Shift logits and targets for next token prediction
-            shift_logits = logits[:, :-1, :].contiguous()
-            shift_labels = target_ids[:, 1:].contiguous()
+            register_metric("image_text_alignment", image_text_alignment)
+            register_metric("cross_modal_coherence", cross_modal_coherence)
+            register_metric("multimodal_inference", multimodal_inference)
+        except ImportError:
+            logger.info("Multimodal metrics not available")
+        
+        # Import and register quantum metrics if available
+        try:
+            from src.evaluation.metrics.quantum import (
+                quantum_entanglement,
+                superposition_score,
+                quantum_fidelity
+            )
             
-            # Calculate loss
-            loss_fct = torch.nn.CrossEntropyLoss(reduction='none')
-            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            register_metric("quantum_entanglement", quantum_entanglement)
+            register_metric("superposition_score", superposition_score)
+            register_metric("quantum_fidelity", quantum_fidelity)
+        except ImportError:
+            logger.info("Quantum metrics not available")
+        
+        # Import and register resonance metrics if available
+        try:
+            from src.evaluation.metrics.resonance import (
+                resonance_magnitude,
+                harmonic_consistency,
+                phase_alignment
+            )
             
-            # Store negative log likelihood
-            nll = loss.view(shift_labels.size(0), -1).sum(1)
-            nlls.append(nll)
-    
-    # Combine results
-    if nlls:
-        return torch.exp(torch.cat(nlls, dim=0).sum() / end_loc).item()
-    else:
-        return float('inf')
-
-
-def parameter_efficiency(model: torch.nn.Module) -> Dict[str, Any]:
-    """
-    Calculate parameter efficiency metrics.
-    
-    Args:
-        model: The model to evaluate
+            register_metric("resonance_magnitude", resonance_magnitude)
+            register_metric("harmonic_consistency", harmonic_consistency)
+            register_metric("phase_alignment", phase_alignment)
+        except ImportError:
+            logger.info("Resonance metrics not available")
         
-    Returns:
-        Dictionary of parameter efficiency metrics
-    """
-    # Count parameters
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    
-    # Calculate sparsity if quantum extension is enabled
-    sparsity = 0.0
-    if hasattr(model, "quantum_extension") and model.quantum_extension is not None:
-        mask_stats = model.quantum_extension.get_mask_statistics()
-        sparsity = mask_stats.get("overall_sparsity", 0.0)
-    
-    # Calculate effective parameters (accounting for sparsity)
-    effective_params = total_params * (1.0 - sparsity)
-    
-    # Compression ratio
-    compression_ratio = total_params / effective_params if effective_params > 0 else 1.0
-    
-    # Parameter breakdown by extension
-    extension_params = {}
-    
-    if hasattr(model, "multimodal_extension") and model.multimodal_extension is not None:
-        mm_params = sum(p.numel() for p in model.multimodal_extension.parameters())
-        extension_params["multimodal"] = mm_params
-    
-    if hasattr(model, "memory_extension") and model.memory_extension is not None:
-        mem_params = sum(p.numel() for p in model.memory_extension.parameters())
-        extension_params["memory"] = mem_params
-    
-    if hasattr(model, "quantum_extension") and model.quantum_extension is not None:
-        q_params = sum(p.numel() for p in model.quantum_extension.parameters())
-        extension_params["quantum"] = q_params
-    
-    # Base model parameters
-    base_params = total_params - sum(extension_params.values())
-    extension_params["base_model"] = base_params
-    
-    return {
-        "total_params": total_params,
-        "trainable_params": trainable_params,
-        "sparsity": sparsity,
-        "effective_params": effective_params,
-        "compression_ratio": compression_ratio,
-        "extension_params": extension_params
-    }
+    except ImportError as e:
+        logger.warning(f"Could not import all metrics: {e}")
 
 
-def memory_usage(model: torch.nn.Module) -> Dict[str, float]:
-    """
-    Calculate memory usage metrics.
-    
-    Args:
-        model: The model to evaluate
-        
-    Returns:
-        Dictionary of memory usage metrics
-    """
-    # Get system memory usage
-    process = psutil.Process()
-    memory_info = process.memory_info()
-    
-    # Calculate model size in memory
-    model_size_bytes = sum(p.nelement() * p.element_size() for p in model.parameters())
-    model_size_mb = model_size_bytes / (1024 * 1024)
-    
-    # Get peak memory usage for CUDA if available
-    peak_gpu_mb = 0
-    if torch.cuda.is_available():
-        peak_gpu_bytes = torch.cuda.max_memory_allocated()
-        peak_gpu_mb = peak_gpu_bytes / (1024 * 1024)
-    
-    # Memory usage by extension
-    extension_memory = {}
-    
-    if hasattr(model, "multimodal_extension") and model.multimodal_extension is not None:
-        mm_bytes = sum(p.nelement() * p.element_size() for p in model.multimodal_extension.parameters())
-        extension_memory["multimodal"] = mm_bytes / (1024 * 1024)
-    
-    if hasattr(model, "memory_extension") and model.memory_extension is not None:
-        mem_bytes = sum(p.nelement() * p.element_size() for p in model.memory_extension.parameters())
-        extension_memory["memory"] = mem_bytes / (1024 * 1024)
-    
-    if hasattr(model, "quantum_extension") and model.quantum_extension is not None:
-        q_bytes = sum(p.nelement() * p.element_size() for p in model.quantum_extension.parameters())
-        extension_memory["quantum"] = q_bytes / (1024 * 1024)
-    
-    return {
-        "process_rss_mb": memory_info.rss / (1024 * 1024),
-        "process_vms_mb": memory_info.vms / (1024 * 1024),
-        "model_size_mb": model_size_mb,
-        "peak_gpu_mb": peak_gpu_mb,
-        "extension_memory_mb": extension_memory
-    }
-
-
-def inference_speed(
-    model: torch.nn.Module,
-    inputs: List[str],
-    num_repeats: int = 3
-) -> Dict[str, float]:
-    """
-    Measure inference speed.
-    
-    Args:
-        model: The model to evaluate
-        inputs: List of input strings
-        num_repeats: Number of repeated measurements
-        
-    Returns:
-        Dictionary of speed metrics
-    """
-    # Ensure model is in evaluation mode
-    model.eval()
-    device = next(model.parameters()).device
-    
-    # Prepare inputs
-    tokenizer = model.tokenizer
-    encoded_inputs = [tokenizer(text, return_tensors="pt").to(device) for text in inputs]
-    
-    # Warm-up run
-    with torch.no_grad():
-        for encoded in encoded_inputs:
-            _ = model(**encoded)
-    
-    # Measure forward pass time
-    forward_times = []
-    
-    for _ in range(num_repeats):
-        for encoded in encoded_inputs:
-            # Forward pass
-            start_time = time.time()
-            with torch.no_grad():
-                _ = model(**encoded)
-            forward_times.append(time.time() - start_time)
-    
-    # Measure generation time
-    generation_times = []
-    
-    for _ in range(num_repeats):
-        for text in inputs:
-            # Text generation
-            start_time = time.time()
-            _ = model.generate(text, max_length=50)
-            generation_times.append(time.time() - start_time)
-    
-    # Calculate metrics
-    avg_forward_time = sum(forward_times) / len(forward_times)
-    avg_generation_time = sum(generation_times) / len(generation_times)
-    
-    # Calculate tokens per second for forward pass
-    total_tokens = sum(encoded.input_ids.numel() for encoded in encoded_inputs)
-    tokens_per_second = total_tokens / sum(forward_times)
-    
-    return {
-        "avg_forward_time": avg_forward_time,
-        "avg_generation_time": avg_generation_time,
-        "tokens_per_second": tokens_per_second,
-        "forward_times_std": np.std(forward_times),
-        "generation_times_std": np.std(generation_times)
-    }
-
-
-def generation_diversity(
-    model: torch.nn.Module,
-    prompts: List[str],
-    num_samples: int = 3,
-    max_length: int = 50,
-    temperature: float = 0.8,
-    top_p: float = 0.9
+def calculate_metrics(
+    model: Any,
+    tokenizer: Any,
+    data: Any,
+    metrics: List[str],
+    config: Optional[Any] = None
 ) -> Dict[str, Any]:
     """
-    Measure diversity of generated text.
+    Calculate multiple metrics on a model.
     
     Args:
-        model: The model to evaluate
-        prompts: List of prompts to generate from
-        num_samples: Number of samples to generate per prompt
-        max_length: Maximum generation length
-        temperature: Sampling temperature
-        top_p: Nucleus sampling probability
+        model: Model to evaluate
+        tokenizer: Tokenizer for the model
+        data: Evaluation data
+        metrics: List of metrics to calculate
+        config: Optional configuration for metrics
         
     Returns:
-        Dictionary of diversity metrics
+        Dictionary mapping metric names to metric results
     """
-    # Ensure model is in evaluation mode
-    model.eval()
+    # Get metrics registry
+    registry = get_metric_registry()
     
-    # Generate multiple samples from each prompt
-    all_generations = []
-    bleu_scores = []
+    # Calculate each metric
+    results = {}
+    for metric_name in metrics:
+        try:
+            # Get metric function
+            metric_fn = registry.get(metric_name)
+            if metric_fn is None:
+                logger.warning(f"Unknown metric: {metric_name}")
+                continue
+            
+            # Calculate metric
+            logger.info(f"Calculating metric: {metric_name}")
+            metric_result = metric_fn(model, tokenizer, data, config)
+            
+            # Ensure result is a dictionary
+            if not isinstance(metric_result, dict):
+                metric_result = {"value": metric_result}
+            
+            # Store result
+            results[metric_name] = metric_result
+            
+        except Exception as e:
+            logger.error(f"Error calculating metric {metric_name}: {e}")
+            results[metric_name] = {"error": str(e)}
     
-    for prompt in prompts:
-        prompt_generations = []
-        
-        for _ in range(num_samples):
-            generation = model.generate(
-                prompt,
-                max_length=max_length,
-                temperature=temperature,
-                top_p=top_p
-            )
-            prompt_generations.append(generation)
-        
-        all_generations.append(prompt_generations)
-        
-        # Calculate pairwise BLEU scores within this prompt's generations
-        for i in range(num_samples):
-            for j in range(i+1, num_samples):
-                gen1_tokens = word_tokenize(prompt_generations[i])
-                gen2_tokens = word_tokenize(prompt_generations[j])
-                
-                # Calculate BLEU in both directions and average
-                bleu1 = sentence_bleu([gen1_tokens], gen2_tokens)
-                bleu2 = sentence_bleu([gen2_tokens], gen1_tokens)
-                avg_bleu = (bleu1 + bleu2) / 2
-                
-                bleu_scores.append(avg_bleu)
-    
-    # Calculate metrics
-    avg_bleu = sum(bleu_scores) / len(bleu_scores) if bleu_scores else 0
-    
-    # Higher BLEU means more similarity, so diversity is the inverse
-    diversity_score = 1.0 - avg_bleu
-    
-    # Calculate unique n-grams
-    all_text = " ".join([gen for prompt_gens in all_generations for gen in prompt_gens])
-    tokens = word_tokenize(all_text)
-    
-    unigrams = set(tokens)
-    bigrams = set(zip(tokens[:-1], tokens[1:]))
-    trigrams = set(zip(tokens[:-2], tokens[1:-1], tokens[2:]))
-    
-    return {
-        "diversity_score": diversity_score,
-        "avg_bleu": avg_bleu,
-        "unique_unigrams": len(unigrams),
-        "unique_bigrams": len(bigrams),
-        "unique_trigrams": len(trigrams),
-        "unique_ratio": len(unigrams) / len(tokens) if tokens else 0
-    }
+    return results
 
 
-def multimodal_accuracy(
-    model: torch.nn.Module,
-    image_text_pairs: List[Dict[str, Any]],
-    options: List[str],
-    reference_answers: List[str]
-) -> Dict[str, float]:
+def compute_overall_score(
+    metric_results: Dict[str, Any],
+    weights: Optional[Dict[str, float]] = None
+) -> float:
     """
-    Measure multimodal accuracy on a visual question answering task.
+    Compute an overall score from multiple metric results.
     
     Args:
-        model: The model to evaluate
-        image_text_pairs: List of image and question pairs
-        options: List of possible answers for each question
-        reference_answers: List of correct answers
+        metric_results: Dictionary mapping metric names to results
+        weights: Optional dictionary mapping metric names to weights
         
     Returns:
-        Dictionary of accuracy metrics
+        Overall weighted score
     """
-    # Ensure model is in evaluation mode
-    model.eval()
+    if not metric_results:
+        return 0.0
     
-    if not hasattr(model, "multimodal_extension") or model.multimodal_extension is None:
-        return {"error": "Multimodal extension not enabled"}
+    # Use equal weights if not provided
+    if weights is None:
+        weights = {metric: 1.0 for metric in metric_results}
     
-    correct_count = 0
+    # Calculate weighted average
+    weighted_sum = 0.0
+    total_weight = 0.0
     
-    for i, pair in enumerate(image_text_pairs):
-        image = pair["image"]
-        question = pair["text"]
-        
-        # Process image
-        vision_features = model.multimodal_extension.process_images([image])[0]
-        
-        # Compute likelihood for each option
-        option_scores = []
-        
-        for option in options[i]:
-            input_text = f"{question} {option}"
-            
-            # Get model output
-            with torch.no_grad():
-                output = model(
-                    input_text,
-                    vision_features=vision_features
-                )
-            
-            # Compute probability of the option given the context
-            if isinstance(output, dict) and "logits" in output:
-                logits = output["logits"]
-            else:
-                logits = output
-            
-            # Simplistic scoring based on final token prediction
-            final_logits = logits[0, -1, :]
-            option_score = F.softmax(final_logits, dim=0).max().item()
-            option_scores.append(option_score)
-        
-        # Select highest scoring option
-        predicted_idx = option_scores.index(max(option_scores))
-        predicted_answer = options[i][predicted_idx]
-        
-        # Check if correct
-        if predicted_answer == reference_answers[i]:
-            correct_count += 1
-    
-    # Calculate accuracy
-    accuracy = correct_count / len(image_text_pairs) if image_text_pairs else 0
-    
-    return {
-        "accuracy": accuracy,
-        "correct_count": correct_count,
-        "total_count": len(image_text_pairs)
-    }
-
-
-def knowledge_graph_retrieval(
-    model: torch.nn.Module,
-    queries: List[Dict[str, Any]],
-    expected_results: List[Any]
-) -> Dict[str, float]:
-    """
-    Measure accuracy of knowledge graph retrieval.
-    
-    Args:
-        model: The model to evaluate
-        queries: List of knowledge graph queries
-        expected_results: List of expected results
-        
-    Returns:
-        Dictionary of retrieval metrics
-    """
-    # Ensure model is in evaluation mode
-    model.eval()
-    
-    if not hasattr(model, "memory_extension") or model.memory_extension is None:
-        return {"error": "Memory extension not enabled"}
-    
-    correct_count = 0
-    partial_matches = 0
-    
-    for i, query in enumerate(queries):
-        query_type = query.get("type", "entity")
-        query_params = query.get("params", {})
-        
-        # Execute query
-        if query_type == "entity":
-            result = model.memory_extension.retrieve_entity(**query_params)
-        elif query_type == "relation":
-            result = model.memory_extension.retrieve_relations(**query_params)
-        else:
+    for metric_name, result in metric_results.items():
+        # Skip metrics with errors
+        if "error" in result:
             continue
         
-        # Compare with expected result
-        expected = expected_results[i]
-        
-        # Exact match
-        if result == expected:
-            correct_count += 1
-        # Partial match for lists of entities/relations
-        elif isinstance(result, list) and isinstance(expected, list):
-            # Calculate overlap
-            if expected:
-                overlap = len(set(result) & set(expected)) / len(expected)
-                if overlap >= 0.5:  # At least 50% match
-                    partial_matches += 1
+        # Extract value
+        if "value" in result and isinstance(result["value"], (int, float)):
+            value = result["value"]
+            
+            # Get weight for this metric
+            weight = weights.get(metric_name, 1.0)
+            
+            # Add to weighted sum
+            weighted_sum += value * weight
+            total_weight += weight
     
-    # Calculate metrics
-    total_queries = len(queries)
-    exact_accuracy = correct_count / total_queries if total_queries else 0
-    partial_accuracy = (correct_count + partial_matches) / total_queries if total_queries else 0
-    
-    return {
-        "exact_accuracy": exact_accuracy,
-        "partial_accuracy": partial_accuracy,
-        "correct_count": correct_count,
-        "partial_matches": partial_matches,
-        "total_queries": total_queries
-    }
+    # Return weighted average
+    if total_weight > 0:
+        return weighted_sum / total_weight
+    else:
+        return 0.0
 
 
-def quantum_efficiency_gain(
-    model: torch.nn.Module,
-    test_inputs: List[str]
-) -> Dict[str, float]:
+# Utility functions for common metric operations
+
+def calculate_perplexity(
+    model: Any,
+    input_ids: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None
+) -> float:
     """
-    Measure efficiency gains from quantum extensions.
+    Calculate perplexity for a batch of inputs.
     
     Args:
-        model: The model to evaluate
-        test_inputs: List of input texts
+        model: Model to evaluate
+        input_ids: Input token IDs
+        attention_mask: Optional attention mask
         
     Returns:
-        Dictionary of efficiency metrics
+        Perplexity score (lower is better)
     """
     # Ensure model is in evaluation mode
     model.eval()
     
-    if not hasattr(model, "quantum_extension") or model.quantum_extension is None:
-        return {"error": "Quantum extension not enabled"}
+    # Prepare inputs
+    inputs = {"input_ids": input_ids}
+    if attention_mask is not None:
+        inputs["attention_mask"] = attention_mask
     
-    # Measure baseline metrics with quantum extension disabled
-    original_state = model.quantum_extension.masks_applied
-    model.quantum_extension.disable_masks()
+    # Forward pass with no gradient computation
+    with torch.no_grad():
+        outputs = model(**inputs, labels=input_ids)
     
-    baseline_times = []
-    for text in test_inputs:
-        start_time = time.time()
-        with torch.no_grad():
-            _ = model(text)
-        baseline_times.append(time.time() - start_time)
-    
-    baseline_avg = sum(baseline_times) / len(baseline_times)
-    
-    # Get parameter counts
-    baseline_params = sum(p.numel() for p in model.parameters())
-    
-    # Measure metrics with quantum extension enabled
-    model.quantum_extension.apply_masks()
-    
-    quantum_times = []
-    for text in test_inputs:
-        start_time = time.time()
-        with torch.no_grad():
-            _ = model(text)
-        quantum_times.append(time.time() - start_time)
-    
-    quantum_avg = sum(quantum_times) / len(quantum_times)
-    
-    # Get mask statistics
-    mask_stats = model.quantum_extension.get_mask_statistics()
-    sparsity = mask_stats.get("overall_sparsity", 0.0)
-    
-    # Calculate effective parameters
-    effective_params = baseline_params * (1.0 - sparsity)
-    
-    # Calculate speedup
-    speedup = baseline_avg / quantum_avg if quantum_avg > 0 else 1.0
-    
-    # Calculate efficiency gain (params reduction * speedup)
-    efficiency_gain = (baseline_params / effective_params) * speedup if effective_params > 0 else 1.0
-    
-    # Restore original state
-    if original_state:
-        model.quantum_extension.apply_masks()
+    # Extract loss
+    if hasattr(outputs, "loss"):
+        loss = outputs.loss
     else:
-        model.quantum_extension.disable_masks()
+        loss = outputs[0]
     
-    return {
-        "baseline_time": baseline_avg,
-        "quantum_time": quantum_avg,
-        "speedup": speedup,
-        "sparsity": sparsity,
-        "baseline_params": baseline_params,
-        "effective_params": effective_params,
-        "parameter_reduction": baseline_params / effective_params if effective_params > 0 else 1.0,
-        "efficiency_gain": efficiency_gain
-    }
+    # Calculate perplexity
+    return torch.exp(loss).item()
+
+
+def calculate_token_accuracy(
+    predictions: torch.Tensor,
+    targets: torch.Tensor,
+    ignore_index: int = -100
+) -> float:
+    """
+    Calculate token-level accuracy.
+    
+    Args:
+        predictions: Predicted token IDs or logits
+        targets: Target token IDs
+        ignore_index: Index to ignore in targets
+        
+    Returns:
+        Accuracy score (higher is better)
+    """
+    # Convert logits to predictions if needed
+    if len(predictions.shape) > len(targets.shape):
+        predictions = torch.argmax(predictions, dim=-1)
+    
+    # Create mask for valid tokens
+    mask = (targets != ignore_index)
+    
+    # Calculate accuracy
+    correct = ((predictions == targets) * mask).sum().item()
+    total = mask.sum().item()
+    
+    # Return accuracy
+    if total > 0:
+        return correct / total
+    else:
+        return 0.0
+
+
+def calculate_sequence_accuracy(
+    predictions: torch.Tensor,
+    targets: torch.Tensor,
+    ignore_index: int = -100
+) -> float:
+    """
+    Calculate sequence-level accuracy (all tokens correct).
+    
+    Args:
+        predictions: Predicted token IDs or logits
+        targets: Target token IDs
+        ignore_index: Index to ignore in targets
+        
+    Returns:
+        Accuracy score (higher is better)
+    """
+    # Convert logits to predictions if needed
+    if len(predictions.shape) > len(targets.shape):
+        predictions = torch.argmax(predictions, dim=-1)
+    
+    # Create mask for valid tokens
+    mask = (targets != ignore_index)
+    
+    # Calculate sequence accuracy
+    correct_seqs = 0
+    total_seqs = targets.size(0)
+    
+    for i in range(total_seqs):
+        seq_mask = mask[i]
+        if seq_mask.sum() == 0:
+            # Skip sequences with no valid tokens
+            total_seqs -= 1
+            continue
+        
+        # Check if all valid tokens match
+        if ((predictions[i] == targets[i]) * seq_mask).sum() == seq_mask.sum():
+            correct_seqs += 1
+    
+    # Return accuracy
+    if total_seqs > 0:
+        return correct_seqs / total_seqs
+    else:
+        return 0.0
+
+
+def text_generation_metrics(
+    model: Any,
+    tokenizer: Any,
+    prompts: List[str],
+    references: List[str],
+    max_new_tokens: int = 100,
+    **generation_kwargs
+) -> Dict[str, float]:
+    """
+    Calculate metrics for text generation.
+    
+    Args:
+        model: Model to evaluate
+        tokenizer: Tokenizer for the model
+        prompts: List of input prompts
+        references: List of reference texts
+        max_new_tokens: Maximum tokens to generate
+        **generation_kwargs: Additional generation parameters
+        
+    Returns:
+        Dictionary with generation metrics
+    """
+    # Ensure model is in evaluation mode
+    model.eval()
+    
+    # Generate texts
+    generated_texts = []
+    for prompt in prompts:
+        # Tokenize prompt
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        
+        # Generate output
+        with torch.no_grad():
+            outputs = model.generate(
+                inputs["input_ids"],
+                max_new_tokens=max_new_tokens,
+                **generation_kwargs
+            )
+        
+        # Decode output
+        generated_text = tokenizer.decode(
+            outputs[0][inputs["input_ids"].size(1):],
+            skip_special_tokens=True
+        )
+        
+        generated_texts.append(generated_text)
+    
+    # Calculate metrics
+    metrics = {}
+    
+    # BLEU score
+    try:
+        from nltk.translate.bleu_score import corpus_bleu
+        references_tokenized = [[r.split()] for r in references]
+        generated_tokenized = [g.split() for g in generated_texts]
+        metrics["bleu"] = corpus_bleu(references_tokenized, generated_tokenized)
+    except ImportError:
+        metrics["bleu"] = None
+    
+    # ROUGE score
+    try:
+        from rouge import Rouge
+        rouge = Rouge()
+        rouge_scores = rouge.get_scores(generated_texts, references, avg=True)
+        metrics["rouge"] = rouge_scores
+    except ImportError:
+        metrics["rouge"] = None
+    
+    # Exact match
+    exact_matches = sum(1 for gen, ref in zip(generated_texts, references) if gen.strip() == ref.strip())
+    metrics["exact_match"] = exact_matches / len(prompts) if prompts else 0
+    
+    return metrics

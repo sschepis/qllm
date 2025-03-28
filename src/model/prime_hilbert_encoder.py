@@ -1,160 +1,169 @@
 """
-Prime Hilbert Encoder Module.
+Prime Hilbert Encoder for QLLM.
 
-This module converts tokens and positions into prime-based subspaces as described in the
-Semantic Resonance Language Model paper.
+This module provides a specialized encoder that uses prime number theory
+and Hilbert space mathematics to create embeddings with unique properties
+for quantum-inspired language models.
 """
 
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Dict, Any, Optional, List, Tuple, Union
 
 
 class PrimeHilbertEncoder(nn.Module):
     """
-    Prime Hilbert Encoder that maps tokens and positions into prime-based subspaces.
+    Encoder that leverages prime number theory and Hilbert spaces.
     
-    Each token w and position n is mapped as:
-    x_w = ⊕_{i=1}^k Proj^(p_i)(baseEmbed(w)) ⊕ PositionEnc(n, p_i)
-    
-    Where:
-    - ⊕ represents concatenation
-    - p_i is a prime number defining a subspace
-    - Proj^(p_i) is a projection from the base embedding dimension to p_i
-    - PositionEnc(n, p_i) is a prime-based positional encoding
+    This encoder creates specialized embeddings based on prime number theory
+    and Hilbert space mathematics, which provide useful properties for
+    quantum-inspired language models.
     """
     
-    def __init__(self, vocab_size, primes=[7, 11, 13, 17, 19], base_dim=768, max_seq_len=512):
+    def __init__(
+        self,
+        hidden_dim: int,
+        primes: List[int],
+        base_dim: int = 32,
+        use_complex: bool = False,
+        normalize_output: bool = True
+    ):
         """
         Initialize the Prime Hilbert Encoder.
         
         Args:
-            vocab_size (int): Size of the vocabulary
-            primes (List[int]): List of prime numbers for subspace decomposition
-            base_dim (int): Dimension of the base embedding
-            max_seq_len (int): Maximum sequence length for positional encodings
+            hidden_dim: Dimension of the hidden state
+            primes: List of prime numbers to use for encoding
+            base_dim: Base dimension for prime encoding
+            use_complex: Whether to use complex numbers
+            normalize_output: Whether to normalize the output
         """
         super().__init__()
-        self.vocab_size = vocab_size
+        
+        self.hidden_dim = hidden_dim
         self.primes = primes
         self.base_dim = base_dim
-        self.max_seq_len = max_seq_len
-        self.embedding_dim = sum(primes)  # Total dimension after concatenation
+        self.use_complex = use_complex
+        self.normalize_output = normalize_output
         
-        # Base embedding for the vocabulary
-        self.base_embedding = nn.Embedding(vocab_size, base_dim)
+        # Create prime basis matrices
+        self.register_buffer("prime_basis", self._create_prime_basis())
         
-        # Projections for each prime subspace
-        self.prime_projections = nn.ModuleList([
-            nn.Linear(base_dim, p) for p in primes
-        ])
-        
-        # Create prime-based positional encodings
-        self.register_buffer('position_encodings', self._create_position_encodings())
+        # Projections for Hilbert space mapping
+        if use_complex:
+            # For complex numbers, we need separate real and imaginary projections
+            self.real_projection = nn.Parameter(torch.randn(hidden_dim, base_dim) * 0.02)
+            self.imag_projection = nn.Parameter(torch.randn(hidden_dim, base_dim) * 0.02)
+        else:
+            # For real numbers, we just need one projection
+            self.projection = nn.Parameter(torch.randn(hidden_dim, base_dim) * 0.02)
     
-    def _create_position_encodings(self):
+    def _create_prime_basis(self) -> torch.Tensor:
         """
-        Create prime-based sinusoidal position encodings.
+        Create prime basis matrices for encoding.
         
         Returns:
-            torch.Tensor: Position encoding tensor of shape [max_seq_len, sum(primes)]
+            Tensor containing prime basis matrices
         """
-        encodings = []
+        # Initialize basis tensor
+        basis = torch.zeros(len(self.primes), self.hidden_dim)
         
-        for prime in self.primes:
-            # Create position encoding for this prime
-            pe = torch.zeros(self.max_seq_len, prime)
-            position = torch.arange(0, self.max_seq_len).unsqueeze(1).float()
+        # Fill basis tensor with prime-based patterns
+        for i, prime in enumerate(self.primes):
+            # Create pattern based on prime number
+            pattern = torch.zeros(self.hidden_dim)
             
-            # Calculate number of dimensions for sin and cos
-            # Ensure we handle odd-sized prime dimensions properly
-            dim_half = prime // 2
-            odd_dim = prime % 2 == 1
+            # Fill pattern based on prime residues
+            for j in range(self.hidden_dim):
+                residue = j % prime
+                angle = 2 * math.pi * residue / prime
+                pattern[j] = math.sin(angle)
             
-            # Create frequency terms based on actual dimensions
-            sin_dim = dim_half + (1 if odd_dim else 0)  # Add extra dimension for sin if prime is odd
-            cos_dim = dim_half
+            # Normalize pattern
+            pattern = F.normalize(pattern, dim=0)
             
-            # Generate frequency terms for sin and cos separately
-            sin_div_term = torch.exp(torch.arange(0, sin_dim).float() * (-math.log(10000.0) / prime))
-            if cos_dim > 0:
-                cos_div_term = torch.exp(torch.arange(0, cos_dim).float() * (-math.log(10000.0) / prime))
-            
-            # Apply sin for first half (plus extra if odd)
-            pe_sin = torch.sin(position * sin_div_term + (position % prime) / prime)
-            pe[:, :sin_dim] = pe_sin
-            
-            # Apply cos for second half if there are dimensions left
-            if cos_dim > 0:
-                pe_cos = torch.cos(position * cos_div_term + (position % prime) / prime)
-                pe[:, sin_dim:] = pe_cos
-            
-            encodings.append(pe)
+            # Store in basis tensor
+            basis[i] = pattern
         
-        # Concatenate all prime-based position encodings
-        return torch.cat(encodings, dim=1)
+        return basis
     
-    def forward(self, input_ids, positions=None):
+    def forward(self, input_tensor: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Forward pass of the Prime Hilbert Encoder.
+        Generate prime Hilbert encoding.
         
         Args:
-            input_ids (torch.Tensor): Token IDs of shape [batch_size, seq_len]
-            positions (torch.Tensor, optional): Position indices. If None, uses default positions.
-        
+            input_tensor: Optional input tensor to encode (if None, returns mask)
+            
         Returns:
-            torch.Tensor: Encoded representation of shape [batch_size, seq_len, embedding_dim]
+            Encoded tensor or prime mask
         """
-        batch_size, seq_len = input_ids.shape
+        # If no input, just return the prime mask
+        if input_tensor is None:
+            return self._generate_prime_mask()
         
-        # Get base embeddings
-        base_embed = self.base_embedding(input_ids)  # [batch_size, seq_len, base_dim]
-        
-        # Use default positions if not provided
-        if positions is None:
-            positions = torch.arange(seq_len, device=input_ids.device).expand(batch_size, seq_len)
-        
-        # Get position encodings
-        pos_encodings = self._get_position_encodings(positions)  # [batch_size, seq_len, embedding_dim]
-        
-        # Project into prime subspaces and add position encodings
-        prime_embeds = []
-        start_idx = 0
-        
-        for i, proj in enumerate(self.prime_projections):
-            # Project base embedding to prime subspace
-            prime_embed = proj(base_embed)  # [batch_size, seq_len, p_i]
+        # Project input to base dimension
+        if self.use_complex:
+            # Complex projection
+            real_proj = torch.matmul(input_tensor, self.real_projection)
+            imag_proj = torch.matmul(input_tensor, self.imag_projection)
             
-            # Get position encoding for this prime
-            end_idx = start_idx + self.primes[i]
-            prime_pos = pos_encodings[:, :, start_idx:end_idx]
+            # Convert to complex domain
+            complex_proj = torch.complex(real_proj, imag_proj)
             
-            # Add position encoding to projected embedding
-            prime_embed = prime_embed + prime_pos
-            prime_embeds.append(prime_embed)
+            # Apply prime basis in complex domain
+            output = torch.matmul(complex_proj, self.prime_basis.transpose(0, 1))
             
-            start_idx = end_idx
+            # Convert back to real domain
+            output = torch.abs(output)
+        else:
+            # Real projection
+            proj = torch.matmul(input_tensor, self.projection)
+            
+            # Apply prime basis
+            output = torch.matmul(proj, self.prime_basis.transpose(0, 1))
         
-        # Concatenate all prime-based embeddings
-        return torch.cat(prime_embeds, dim=-1)  # [batch_size, seq_len, embedding_dim]
+        # Normalize if required
+        if self.normalize_output:
+            output = F.normalize(output, dim=-1)
+        
+        return output
     
-    def _get_position_encodings(self, positions):
+    def _generate_prime_mask(self) -> torch.Tensor:
         """
-        Get position encodings for given positions.
-        
-        Args:
-            positions (torch.Tensor): Position indices of shape [batch_size, seq_len]
+        Generate a prime-based mask for attention.
         
         Returns:
-            torch.Tensor: Position encodings of shape [batch_size, seq_len, embedding_dim]
+            Prime mask tensor
         """
-        batch_size, seq_len = positions.shape
+        # Generate a mask based on prime patterns
+        mask = torch.ones(self.hidden_dim)
         
-        # Ensure positions are within range
-        positions = torch.clamp(positions, 0, self.max_seq_len - 1)
+        # Apply prime patterns
+        for i, prime in enumerate(self.primes):
+            # Create pattern based on prime
+            for j in range(self.hidden_dim):
+                # Only activate on positions that are divisible by prime
+                if j % prime == 0:
+                    mask[j] *= math.sin(math.pi / prime) + 1.0
         
-        # Gather position encodings for each position
-        pos_encodings = self.position_encodings[positions]  # [batch_size, seq_len, embedding_dim]
+        # Normalize to [0, 1] range
+        mask = (mask - mask.min()) / (mask.max() - mask.min() + 1e-6)
         
-        return pos_encodings
+        return mask
+    
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Get encoder configuration.
+        
+        Returns:
+            Configuration dictionary
+        """
+        return {
+            "hidden_dim": self.hidden_dim,
+            "primes": self.primes,
+            "base_dim": self.base_dim,
+            "use_complex": self.use_complex,
+            "normalize_output": self.normalize_output
+        }

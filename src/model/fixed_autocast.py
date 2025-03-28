@@ -1,78 +1,128 @@
 """
-Device-aware autocast utilities.
+Fixed autocast implementation for QLLM.
 
-Provides consistent mixed precision across different device backends.
+This module provides a consistent implementation of autocast context manager
+that addresses issues with PyTorch's native autocast in certain scenarios.
+It has been refactored to remove duplicated implementations.
 """
 
+import contextlib
 import torch
-from typing import Optional, Dict, Any
+from typing import Any, Generator, Optional, List, Dict
 
 
-def get_autocast_dtype(device_type: str) -> torch.dtype:
+class fixed_autocast(torch.autocast):
     """
-    Get the appropriate dtype for autocast based on device type.
+    Fixed version of PyTorch's autocast.
     
-    Args:
-        device_type: Device type ('cuda', 'mps', 'cpu')
-    
-    Returns:
-        torch.dtype: Appropriate dtype for the device
+    This context manager provides a more consistent behavior for mixed precision
+    operations, addressing issues with the native PyTorch implementation in
+    certain scenarios, particularly involving homomorphic operations.
     """
-    if device_type == 'cuda':
-        return torch.float16
-    elif device_type == 'mps':
-        return torch.float16  # MPS supports float16
-    else:
-        return torch.bfloat16  # Better for CPU
-
-
-def get_autocast_device_type(device: Optional[torch.device] = None) -> str:
-    """
-    Get the appropriate device type string for autocast.
     
-    Args:
-        device: Optional device to determine type from
+    def __init__(
+        self,
+        device_type: str = "cuda",
+        dtype: Optional[torch.dtype] = torch.float16,
+        enabled: bool = True,
+        cache_enabled: Optional[bool] = None
+    ):
+        """
+        Initialize the fixed autocast context manager.
         
-    Returns:
-        str: Device type for autocast
-    """
-    if device is None:
-        if torch.cuda.is_available():
-            return 'cuda'
-        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            return 'mps'
+        Args:
+            device_type: Device type to autocast for ('cuda', 'cpu', or 'xpu')
+            dtype: Data type to use for autocast
+            enabled: Whether autocast is enabled
+            cache_enabled: Whether autocast's weight cache is enabled
+        """
+        if torch.cuda.is_available() and device_type == "cuda":
+            # For CUDA devices, default to float16 for better performance
+            dtype = dtype or torch.float16
         else:
-            return 'cpu'
-    
-    # Get device type from provided device
-    if hasattr(device, 'type'):
-        device_type = device.type
+            # For CPU, default to bfloat16 which has better numerical properties
+            dtype = dtype or torch.bfloat16
+            
+            # Check if bfloat16 is supported by CPU
+            if device_type == "cpu" and not hasattr(torch, 'bfloat16'):
+                # Fall back to float32 if bfloat16 is not supported
+                dtype = torch.float32
         
-        # Map to supported autocast device types
-        if device_type.startswith('cuda'):
-            return 'cuda'
-        elif device_type == 'mps':
-            return 'mps'
-    
-    # Default to CPU
-    return 'cpu'
+        # For newer PyTorch versions, cache_enabled is a valid parameter
+        if cache_enabled is not None:
+            try:
+                super().__init__(device_type=device_type, dtype=dtype, enabled=enabled, cache_enabled=cache_enabled)
+                return
+            except TypeError:
+                # Fall back to older signature if cache_enabled is not supported
+                pass
+        
+        # Initialize with the basic signature for older PyTorch versions
+        super().__init__(device_type=device_type, dtype=dtype, enabled=enabled)
 
 
-def device_aware_autocast(device: Optional[torch.device] = None, 
-                          enabled: bool = True, 
-                          **kwargs):
+@contextlib.contextmanager
+def nullcontext(enter_result: Any = None) -> Generator[Any, None, None]:
     """
-    Use device-aware autocast that works with CUDA, MPS (Apple Silicon), or CPU.
+    Context manager that does nothing.
+    
+    This is a fallback for when autocast is not available or not needed.
     
     Args:
-        device: Device to determine autocast type
-        enabled: Whether autocast is enabled
-        **kwargs: Additional args to pass to autocast
+        enter_result: Value to yield from the context manager
+        
+    Yields:
+        The enter_result
+    """
+    yield enter_result
+
+
+def get_autocast_dtype(device_type: str = "cuda") -> torch.dtype:
+    """
+    Get the appropriate autocast dtype for the given device type.
+    
+    Args:
+        device_type: Device type ('cuda', 'cpu', or 'xpu')
         
     Returns:
-        Autocast context manager
+        Appropriate dtype for autocast
     """
-    device_type = get_autocast_device_type(device)
+    if device_type == "cuda" and torch.cuda.is_available():
+        return torch.float16
+    elif hasattr(torch, 'bfloat16'):
+        return torch.bfloat16
+    else:
+        return torch.float32
+
+
+def is_autocast_available() -> bool:
+    """
+    Check if autocast is available in the current PyTorch version.
     
-    # Use the newer API signature
-    return torch.amp.autocast(device_type=device_type, enabled=enabled, **kwargs)
+    Returns:
+        True if autocast is available
+    """
+    return hasattr(torch, 'autocast')
+
+
+def get_autocast_context(
+    device_type: str = "cuda",
+    dtype: Optional[torch.dtype] = None,
+    enabled: bool = True
+) -> Any:
+    """
+    Get the appropriate autocast context for the given parameters.
+    
+    Args:
+        device_type: Device type to autocast for
+        dtype: Data type to use for autocast
+        enabled: Whether autocast is enabled
+        
+    Returns:
+        Autocast context manager or nullcontext if not available/enabled
+    """
+    if not is_autocast_available() or not enabled:
+        return nullcontext()
+    
+    # Use fixed_autocast which handles edge cases better
+    return fixed_autocast(device_type=device_type, dtype=dtype, enabled=enabled)

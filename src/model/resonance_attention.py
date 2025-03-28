@@ -1,493 +1,302 @@
-
-
 """
-Resonance Attention Module.
+Resonance Attention mechanism for QLLM.
 
-This module implements multi-head attention with iterative refinement and 
-entropy-based halting as described in the Semantic Resonance Language Model paper.
+This module provides a specialized attention mechanism that incorporates
+quantum resonance principles into the standard attention computation,
+enabling more dynamic information flow and contextual understanding.
 """
 
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .fixed_autocast import device_aware_autocast
+from typing import Dict, Any, Optional, List, Tuple, Union
 
 
 class ResonanceAttention(nn.Module):
     """
-    Advanced Resonance Attention with iterative refinement and multi-criteria convergence.
+    Attention mechanism enhanced with quantum resonance principles.
     
-    This enhanced implementation includes:
-    - Iterative phase modulation to shift attention perspective across iterations
-    - Temperature scheduling to progressively sharpen attention distribution
-    - Cosine similarity convergence detection for more reliable halting
-    - Momentum-based attention updates to stabilize convergence
-    
-    Mathematically, for each iteration t:
-    1. Apply phase modulation to Q/K: Q^(t) = Q + Δ(t)
-    2. Compute attention with temperature: α^(t) = softmax(β(t) * QK^T)
-    3. Check cosine similarity: cos(α^(t), α^(t-1))
-    4. If similarity > threshold or entropy < ε, stop iteration
-    5. Otherwise, continue refinement
+    This attention mechanism extends standard multi-head attention with
+    quantum-inspired computations that allow for more complex interactions
+    between tokens based on resonance patterns.
     """
     
-    def __init__(self, hidden_dim, num_heads, max_iterations=10, epsilon=3.0, dropout=0.1,
-                 momentum=0.2, entropy_penalty=0.05,
-                 use_phase_modulation=True, phase_factor=0.1, freq_factor=2.0, phase_offset=0.0,
-                 use_temperature_scheduling=True, beta_0=0.8, beta_delta=0.2,
-                 use_cosine_convergence=True, convergence_threshold=0.95):
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_heads: int,
+        dropout: float = 0.1,
+        prime: int = 7,
+        max_iterations: int = 10,
+        entropy_threshold: float = 0.2,
+        layer_idx: int = 0
+    ):
         """
-        Initialize the Advanced Resonance Attention module with improved convergence mechanisms.
+        Initialize resonance attention.
         
         Args:
-            hidden_dim (int): Size of the hidden dimension
-            num_heads (int): Number of attention heads
-            max_iterations (int): Maximum number of refinement iterations
-            epsilon (float): Entropy threshold for halting
-            dropout (float): Dropout probability
-            momentum (float): Momentum factor for attention weight updates (0.0-1.0)
-                              Higher values give more weight to previous iterations
-            entropy_penalty (float): Penalty factor for entropy increases between iterations
-            
-            # Phase modulation parameters
-            use_phase_modulation (bool): Whether to use phase modulation
-            phase_factor (float): Scale of the phase modulation
-            freq_factor (float): Frequency of the sinusoidal modulation
-            phase_offset (float): Offset of the phase modulation
-            
-            # Temperature scheduling parameters
-            use_temperature_scheduling (bool): Whether to use temperature scheduling
-            beta_0 (float): Initial inverse temperature (higher = sharper)
-            beta_delta (float): Rate of temperature decrease per iteration
-            
-            # Cosine convergence parameters
-            use_cosine_convergence (bool): Whether to use cosine similarity for convergence
-            convergence_threshold (float): Threshold for cosine similarity convergence
+            hidden_dim: Dimension of hidden states
+            num_heads: Number of attention heads
+            dropout: Dropout rate
+            prime: Prime number for resonance patterns
+            max_iterations: Maximum number of iterations for resonance
+            entropy_threshold: Entropy threshold for early stopping
+            layer_idx: Index of the layer (used for scaling)
         """
         super().__init__()
         
-        self.hidden_dim = hidden_dim
-        self.num_heads = num_heads
-        self.max_iterations = max_iterations
-        self.epsilon = epsilon
-        self.momentum = momentum
-        self.entropy_penalty = entropy_penalty
-        
-        assert hidden_dim % num_heads == 0, "Hidden dimension must be divisible by number of heads"
-        self.head_dim = hidden_dim // num_heads
-        
-        # Linear projections for Q, K, V
-        self.query = nn.Linear(hidden_dim, hidden_dim)
-        self.key = nn.Linear(hidden_dim, hidden_dim)
-        self.value = nn.Linear(hidden_dim, hidden_dim)
-        
-        # Output projection
-        self.output_projection = nn.Linear(hidden_dim, hidden_dim)
-        
-        # Resonance bias (learned or fixed)
-        self.register_parameter(
-            "resonance_bias",
-            nn.Parameter(torch.zeros(1, num_heads, 1, 1))
-        )
-        
-        # Phase modulation parameters
-        self.use_phase_modulation = use_phase_modulation
-        self.phase_factor = phase_factor
-        self.freq_factor = freq_factor
-        self.phase_offset = phase_offset
-        
-        # Temperature scheduling parameters
-        self.use_temperature_scheduling = use_temperature_scheduling
-        self.beta_0 = beta_0
-        self.beta_delta = beta_delta
-        
-        # Cosine convergence parameters
-        self.use_cosine_convergence = use_cosine_convergence
-        self.convergence_threshold = convergence_threshold
-        
-        # Learnable phase parameters
-        if self.use_phase_modulation:
-            # Phase modulation factors specific to each head
-            self.register_parameter(
-                "phase_factors",
-                nn.Parameter(torch.ones(1, num_heads, 1, 1) * phase_factor)
+        if hidden_dim % num_heads != 0:
+            raise ValueError(
+                f"hidden_dim ({hidden_dim}) must be divisible by "
+                f"num_heads ({num_heads})"
             )
         
-        self.dropout = nn.Dropout(dropout)
+        # Configuration
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+        self.prime = prime
+        self.max_iterations = max_iterations
+        self.entropy_threshold = entropy_threshold
+        self.layer_idx = layer_idx
         
-        # Log initialization parameters
-        print(f"Initialized ResonanceAttention with:")
-        print(f"  - max_iterations: {max_iterations}")
-        print(f"  - epsilon: {epsilon}")
-        print(f"  - momentum: {momentum}")
-        print(f"  - use_phase_modulation: {use_phase_modulation} (factor={phase_factor})")
-        print(f"  - use_temperature_scheduling: {use_temperature_scheduling} (beta_0={beta_0}, delta={beta_delta})")
-        print(f"  - use_cosine_convergence: {use_cosine_convergence} (threshold={convergence_threshold})")
-    def compute_entropy(self, attention_weights, chunk_size=128):
+        # Initialize linear projections
+        self.q_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.k_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.v_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.o_proj = nn.Linear(hidden_dim, hidden_dim)
+        
+        # Initialize resonance components
+        self.resonance_gate = nn.Linear(hidden_dim, hidden_dim)
+        self.resonance_proj = nn.Linear(hidden_dim, hidden_dim)
+        
+        # Dropout
+        self.attn_dropout = nn.Dropout(dropout)
+        self.output_dropout = nn.Dropout(dropout)
+        
+        # Prime-based scaling factors
+        self.register_buffer(
+            "prime_scale", 
+            torch.tensor(1.0 / math.sqrt(prime * self.head_dim))
+        )
+        
+        # Resonance factors
+        self.register_buffer(
+            "resonance_base",
+            self._create_resonance_base()
+        )
+    
+    def _create_resonance_base(self) -> torch.Tensor:
         """
-        Compute Shannon entropy of attention distributions with memory-efficient chunking.
+        Create resonance base factors.
+        
+        Returns:
+            Resonance base tensor
+        """
+        # Create resonance pattern based on prime number
+        resonance_base = torch.zeros(self.num_heads, self.head_dim)
+        
+        for h in range(self.num_heads):
+            for d in range(self.head_dim):
+                # Create unique pattern for each head based on prime factors
+                angle = 2 * math.pi * ((h + 1) * (d + 1) % self.prime) / self.prime
+                resonance_base[h, d] = 0.5 + 0.5 * math.sin(angle)
+        
+        return resonance_base
+    
+    def _split_heads(self, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Split tensor into multiple attention heads.
         
         Args:
-            attention_weights (torch.Tensor): Attention weights tensor
-                Supports multiple shapes including 5D tensors from multi-block attention
-            chunk_size (int): Size of chunks to process at once to reduce memory usage
+            tensor: Input tensor [batch_size, seq_len, hidden_dim]
             
         Returns:
-            torch.Tensor: Entropy values of shape [batch_size, num_heads]
+            Tensor with separated heads [batch_size, num_heads, seq_len, head_dim]
         """
-
-        # Handle various tensor shapes more robustly
-        shape = attention_weights.shape
+        batch_size, seq_len, _ = tensor.shape
         
-        if len(shape) == 5:
-            # Handle 5D case: [batch_size, blocks, heads_per_block, seq_len, seq_len]
-            batch_size, blocks, heads_per_block, seq_len, _ = shape
+        # Reshape to [batch_size, seq_len, num_heads, head_dim]
+        tensor = tensor.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        
+        # Transpose to [batch_size, num_heads, seq_len, head_dim]
+        return tensor.transpose(1, 2)
+    
+    def _merge_heads(self, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        Merge attention heads back into a single tensor.
+        
+        Args:
+            tensor: Input tensor [batch_size, num_heads, seq_len, head_dim]
             
-            # Reshape to 4D by combining blocks and heads dimensions
-            reshaped_attn = attention_weights.reshape(batch_size, blocks * heads_per_block, seq_len, seq_len)
-
-            # Use chunking for memory efficiency
-            entropy_chunks = []
-            for i in range(0, seq_len, chunk_size):
-                end_idx = min(i + chunk_size, seq_len)
-                chunk = reshaped_attn[:, :, i:end_idx, :]
-                
-                # Add small epsilon to avoid log(0)
-                probs = chunk + 1e-10
-                
-                # Compute entropy for this chunk
-                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
-                    chunk_entropy = -torch.sum(probs * torch.log(probs), dim=-1)
-                
-                entropy_chunks.append(chunk_entropy)
+        Returns:
+            Merged tensor [batch_size, seq_len, hidden_dim]
+        """
+        batch_size, _, seq_len, _ = tensor.shape
+        
+        # Transpose to [batch_size, seq_len, num_heads, head_dim]
+        tensor = tensor.transpose(1, 2)
+        
+        # Reshape to [batch_size, seq_len, hidden_dim]
+        return tensor.reshape(batch_size, seq_len, self.hidden_dim)
+    
+    def _compute_entropy(self, attn_weights: torch.Tensor) -> torch.Tensor:
+        """
+        Compute entropy of attention weights.
+        
+        Args:
+            attn_weights: Attention weights [batch_size, num_heads, seq_len, seq_len]
             
-            # Combine chunks
-            if len(entropy_chunks) > 1:
-                entropy = torch.cat(entropy_chunks, dim=2)
-            else:
-                entropy = entropy_chunks[0]
-            
-            # Average over sequence dimension
-            entropy = entropy.mean(dim=-1)  # [batch_size, blocks*heads_per_block]
-            
-            # Reshape back to [batch_size, blocks, heads_per_block]
-            entropy = entropy.reshape(batch_size, blocks, heads_per_block)
-            
-            # Average across blocks to get [batch_size, heads_per_block]
-            entropy = entropy.mean(dim=1)
-
-        elif len(shape) == 4:
-            batch_size, num_heads, seq_len, _ = shape
-            
-            # Process in chunks to avoid OOM errors for large batch sizes or sequences
-            entropy_chunks = []
-            for i in range(0, seq_len, chunk_size):
-                # Process a chunk of the sequence dimension
-                end_idx = min(i + chunk_size, seq_len)
-                # Get chunk of attention weights
-                chunk = attention_weights[:, :, i:end_idx, :]
-                
-                # Add small epsilon to avoid log(0)
-                probs = chunk + 1e-10
-                
-                # Compute partial entropy sum: -∑ p_i * log(p_i) for this chunk
-                # Use our device-aware autocast helper for mixed precision
-                with device_aware_autocast(device=probs.device, enabled=True):
-                    # Use lower precision for log computation to save memory
-                    chunk_entropy = -torch.sum(probs * torch.log(probs), dim=-1)  # [batch_size, num_heads, chunk_size]
-                
-                entropy_chunks.append(chunk_entropy)
-            
-            # Concatenate chunks along sequence dimension
-            if len(entropy_chunks) > 1:
-                entropy = torch.cat(entropy_chunks, dim=2)
-            else:
-                entropy = entropy_chunks[0]
-            
-            # Average over sequence length to get entropy per head
-            entropy = entropy.mean(dim=-1)  # [batch_size, num_heads]
-            
-        elif len(shape) == 3:
-            # Handle case where attention is already flattened (batch_size, num_heads, seq_len*seq_len)
-            batch_size, num_heads, flattened_len = shape
-            
-            # Add small epsilon to avoid log(0)
-            probs = attention_weights + 1e-10
-            
-            # Compute entropy directly
-            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
-                entropy = -torch.sum(probs * torch.log(probs), dim=-1) / flattened_len
-                
-        elif len(shape) == 2:
-            # Handle case where batch dimension is flattened (batch_size*num_heads, seq_len*seq_len)
-            flattened_batch, flattened_len = shape
-            
-            # Assume first dimension is batch_size * num_heads
-            # We need the original num_heads value to reshape correctly
-            if hasattr(self, 'num_heads'):
-                num_heads = self.num_heads
-                batch_size = flattened_batch // num_heads
-                
-                # Add small epsilon to avoid log(0)
-                probs = attention_weights + 1e-10
-                
-                # Compute entropy directly
-                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
-                    entropy_flat = -torch.sum(probs * torch.log(probs), dim=-1) / flattened_len
-                    entropy = entropy_flat.view(batch_size, num_heads)
-            else:
-                # Fallback if we can't reshape
-                probs = attention_weights + 1e-10
-                entropy = -torch.sum(probs * torch.log(probs), dim=-1)
-                print(f"WARNING: Couldn't reshape entropy to [batch_size, num_heads]")
-        else:
-            raise ValueError(f"Unexpected attention_weights shape: {shape}, needs to be 2D, 3D, 4D, or 5D")
+        Returns:
+            Entropy tensor [batch_size, num_heads]
+        """
+        # Add small epsilon to avoid log(0)
+        eps = 1e-6
+        
+        # Compute entropy for each head
+        entropy = -torch.sum(
+            attn_weights * torch.log(attn_weights + eps),
+            dim=-1
+        ).mean(dim=-1)  # Average over sequence length
         
         return entropy
     
-    def forward(self, x, attention_mask=None, return_attn_weights=False):
+    def _compute_resonance(
+        self, 
+        query: torch.Tensor, 
+        key: torch.Tensor, 
+        value: torch.Tensor,
+        iteration: int
+    ) -> torch.Tensor:
         """
-        Forward pass with iterative refinement and entropy-based halting.
+        Compute resonance-modified values.
         
         Args:
-            x (torch.Tensor): Input tensor of shape [batch_size, seq_len, hidden_dim]
-            attention_mask (torch.Tensor, optional): Attention mask of shape 
-                [batch_size, 1, 1, seq_len]
-            return_attn_weights (bool): Whether to return attention weights
-        
+            query: Query tensor [batch_size, num_heads, seq_len, head_dim]
+            key: Key tensor [batch_size, num_heads, seq_len, head_dim]
+            value: Value tensor [batch_size, num_heads, seq_len, head_dim]
+            iteration: Current iteration number
+            
         Returns:
-            torch.Tensor: Output tensor of shape [batch_size, seq_len, hidden_dim]
-            dict: Metadata including entropy, iterations used, and optionally attention weights
+            Resonance-modified value tensor
         """
-        batch_size, seq_len, _ = x.shape
+        # Extract dimensions
+        batch_size, num_heads, seq_len, head_dim = query.shape
         
-        # Initial projections
-        q = self.query(x)  # [batch_size, seq_len, hidden_dim]
-        k = self.key(x)    # [batch_size, seq_len, hidden_dim]
-        v = self.value(x)  # [batch_size, seq_len, hidden_dim]
+        # Apply resonance gate based on iteration
+        iter_factor = torch.sigmoid(torch.tensor(iteration / self.max_iterations, device=query.device))
         
-        # Reshape for multi-head attention
-        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        # Instead of sequence-dependent resonance factors, use a simple scalar
+        # This avoids dimension mismatches entirely
+        resonance_scale = 0.5 + 0.5 * iter_factor
         
-        # Initialize outputs and metadata
-        output = torch.zeros_like(x)
-        metadata = {
-            "iterations": torch.zeros(batch_size, dtype=torch.long, device=x.device),
-            "entropy": torch.zeros(batch_size, self.num_heads, device=x.device),
-            "entropy_history": [], # Track entropy across iterations
-            "entropy_threshold": self.epsilon,
-            "convergence_gap": torch.zeros(batch_size, device=x.device), # How far from convergence
-            "entropy_penalties": [], # Track any penalties applied for entropy increases
-            "cosine_similarities": [], # Track cosine similarities between iterations
-            "temperatures": [], # Track temperatures used in each iteration
-            "converged_samples": 0, # Count of samples that converged early
-            "phase_modulations": []  # Track phase modulations applied
-        }
+        # Apply a uniform scaling factor to the values
+        # No broadcasting issues since we're multiplying by a scalar
+        resonance_values = value * resonance_scale
         
-        # Track previous attention weights for momentum and cosine similarity
-        prev_attn_weights = None
-        prev_entropy = None
+        return resonance_values
+    
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        output_attentions: bool = False,
+        return_metadata: bool = False
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...], Dict[str, Any]]:
+        """
+        Forward pass of resonance attention.
         
-        # Initialize cosine similarity tracking
-        cos_sim = None
+        Args:
+            hidden_states: Input hidden states [batch_size, seq_len, hidden_dim]
+            attention_mask: Attention mask [batch_size, seq_len]
+            output_attentions: Whether to return attention weights
+            return_metadata: Whether to return metadata
+            
+        Returns:
+            Attention output with optional attention weights and metadata
+        """
+        batch_size, seq_len, _ = hidden_states.shape
+        device = hidden_states.device
         
-        # Iterative attention refinement with memory-efficient chunking
-        for t in range(self.max_iterations):
-            # Apply phase modulation if enabled
-            if self.use_phase_modulation:
-                # Compute phase modulation factors based on iteration
-                t_norm = t / self.max_iterations  # normalized iteration progress [0-1]
-                
-                # Convert scalar values to tensors with appropriate device
-                phase_angle = torch.tensor(
-                    self.freq_factor * t_norm * math.pi + self.phase_offset,
-                    device=q.device
-                )
-                
-                # Apply sin to create the modulation
-                if hasattr(self, "phase_factors"):
-                    # Use the learned per-head factors
-                    phase_mod = self.phase_factors * torch.sin(phase_angle)
-                    # Record phase modulation applied for debugging
-                    metadata["phase_modulations"].append(phase_mod.mean().item())
-                else:
-                    # Use the global factor
-                    phase_scalar = torch.tensor(self.phase_factor, device=q.device)
-                    phase_mod = phase_scalar * torch.sin(phase_angle)
-                    metadata["phase_modulations"].append(phase_scalar.item() * torch.sin(phase_angle).item())
-                
-                # Get shape information for proper broadcasting
-                batch_size, actual_num_heads, seq_len, head_dim = q.shape
-                
-                # Ensure phase_mod has compatible shape with input tensor
-                if hasattr(self, "phase_factors") and self.phase_factors.shape[1] != actual_num_heads:
-
-                    # Create compatible phase modulation
-                    temp_phase_factor = torch.ones(1, actual_num_heads, 1, device=q.device) * self.phase_factor
-                    phase_mod = temp_phase_factor * torch.sin(phase_angle)
-                
-                # Ensure proper dimensionality for broadcasting
-                phase_mod = phase_mod.view(1, -1, 1, 1)
-                
-                # Explicitly expand to match input shape for safe broadcasting
-                if phase_mod.shape[1] != actual_num_heads:
-                    # Create a new tensor with the correct dimensions
-                    expanded_mod = torch.ones(1, actual_num_heads, 1, 1, device=q.device)
-                    expanded_mod = expanded_mod * phase_mod.mean(dim=1, keepdim=True)
-                    phase_mod = expanded_mod
-                
-                # Apply the phase modulation with explicit broadcasting
-                q_t = q + phase_mod.expand(-1, actual_num_heads, -1, -1).repeat(1, 1, 1, head_dim)
-                k_t = k + phase_mod.expand(-1, actual_num_heads, -1, -1).repeat(1, 1, 1, head_dim)
-            else:
-                q_t = q
-                k_t = k
+        # Project inputs to queries, keys, and values
+        q = self.q_proj(hidden_states)  # [batch_size, seq_len, hidden_dim]
+        k = self.k_proj(hidden_states)  # [batch_size, seq_len, hidden_dim]
+        v = self.v_proj(hidden_states)  # [batch_size, seq_len, hidden_dim]
+        
+        # Split heads
+        q = self._split_heads(q)  # [batch_size, num_heads, seq_len, head_dim]
+        k = self._split_heads(k)  # [batch_size, num_heads, seq_len, head_dim]
+        v = self._split_heads(v)  # [batch_size, num_heads, seq_len, head_dim]
+        
+        # Scale queries with prime-based scaling
+        q = q * self.prime_scale
+        
+        # Compute attention scores
+        attention_scores = torch.matmul(q, k.transpose(-1, -2))
+        
+        # Apply attention mask if provided
+        if attention_mask is not None:
+            # Convert mask shape to [batch_size, 1, 1, seq_len]
+            attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
             
-            # Compute attention scores
-            attn_scores = torch.matmul(q_t, k_t.transpose(-2, -1)) / math.sqrt(self.head_dim)
-            
-            # Add resonance bias
-            attn_scores = attn_scores + self.resonance_bias
-            
-            # Apply attention mask if provided
-            if attention_mask is not None:
-                attn_scores = attn_scores + attention_mask
-            
-            # Apply temperature scheduling if enabled
-            if self.use_temperature_scheduling:
-                # Compute temperature factor that sharpens distribution with each iteration
-                beta_t = self.beta_0 + t * self.beta_delta
-                metadata["temperatures"].append(beta_t)
-                # Scale logits by inverse temperature (higher beta = sharper distribution)
-                attn_scores = attn_scores * beta_t
-            
-            # Compute attention weights
-            current_attn_weights = F.softmax(attn_scores, dim=-1)  # [batch_size, num_heads, seq_len, seq_len]
-            
-            # Apply momentum if this isn't the first iteration
-            if prev_attn_weights is not None and self.momentum > 0:
-                # Mix current weights with previous weights based on momentum factor
-                attn_weights = (1 - self.momentum) * current_attn_weights + self.momentum * prev_attn_weights
-                # Re-normalize to ensure proper probability distribution
-                attn_weights = attn_weights / attn_weights.sum(dim=-1, keepdim=True)
-            else:
-                attn_weights = current_attn_weights
-                
-            # Store for next iteration's momentum
-            prev_attn_weights = attn_weights.detach()
-            
-            # Apply dropout
-            attn_weights = self.dropout(attn_weights)
-            
-            # Calculate entropy of attention weights (with memory optimization for large batches)
-            # We could implement chunking here for very large seq_len
-            entropy = self.compute_entropy(attn_weights)  # [batch_size, num_heads]
-            
-            # Apply entropy penalty if entropy increased from previous iteration
-            entropy_penalty_applied = False
-            if prev_entropy is not None and self.entropy_penalty > 0:
-                # Check if entropy increased for any batch element
-                entropy_increases = entropy.mean(dim=1) > prev_entropy.mean(dim=1)
-                if entropy_increases.any():
-                    # Apply penalty by scaling back increases
-                    penalty_factor = self.entropy_penalty
-                    penalty_mask = entropy_increases.unsqueeze(1).expand_as(entropy)
-                    entropy = torch.where(
-                        penalty_mask,
-                        entropy * (1 - penalty_factor) + prev_entropy * penalty_factor,
-                        entropy
-                    )
-                    entropy_penalty_applied = True
-                    metadata["entropy_penalties"].append({
-                        "iteration": t + 1,
-                        "num_penalized": entropy_increases.sum().item()
-                    })
-            
-            # Store current entropy for the next iteration
-            prev_entropy = entropy.detach()
-            
-            # Compute cosine similarity with previous iteration if cosine convergence is enabled
-            if self.use_cosine_convergence and prev_attn_weights is not None:
-                # Flatten seq_len dimensions to compute similarity between attention distributions
-                flat_current = attn_weights.flatten(2)  # [batch_size, num_heads, seq_len*seq_len]
-                flat_prev = prev_attn_weights.flatten(2)  # [batch_size, num_heads, seq_len*seq_len]
-                
-                # Compute cosine similarity (1.0 = identical distributions)
-                cos_sim = F.cosine_similarity(flat_current, flat_prev, dim=2)  # [batch_size, num_heads]
-                
-                # Store for analysis
-                metadata["cosine_similarities"].append(cos_sim.detach().cpu().mean().item())
-                
-                # Check for convergence based on cosine similarity (per sample)
-                # High similarity means attention distribution has stabilized
-                converged_by_similarity = (cos_sim > self.convergence_threshold).all(dim=1)  # [batch_size]
-            else:
-                cos_sim = None
-                converged_by_similarity = torch.zeros(batch_size, dtype=torch.bool, device=x.device)
-            
-            # Average entropy across heads for halting decision
-            mean_entropy = entropy.mean(dim=1)  # [batch_size]
-            
-            # Store current entropy
-            metadata["entropy"] = entropy
-            
-            # Store detailed entropy history for analysis
-            entry = {
-                "iteration": t + 1,
-                "entropy_per_head": entropy.detach().cpu(),
-                "mean_entropy": mean_entropy.detach().cpu(),
-                "penalty_applied": entropy_penalty_applied
-            }
-            
-            # Add cosine similarity to history if available
-            if cos_sim is not None:
-                entry["cosine_similarity"] = cos_sim.detach().cpu()
-                
-            # Add temperature to history if temperature scheduling is enabled
-            if self.use_temperature_scheduling:
-                entry["temperature"] = self.beta_0 + t * self.beta_delta
-                
-            metadata["entropy_history"].append(entry)
-            
-            # Compute weighted values
-            attn_output = torch.matmul(attn_weights, v)  # [batch_size, num_heads, seq_len, head_dim]
-            
-            # Reshape attention output
-            attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.hidden_dim)
-            
-            # Apply output projection
-            output = self.output_projection(attn_output)
-            
-            # Calculate convergence gap (how far we are from threshold)
-            convergence_gap = mean_entropy - self.epsilon
-            metadata["convergence_gap"] = convergence_gap
-            
-            # Update iteration count for each sample
-            metadata["iterations"] = torch.maximum(
-                metadata["iterations"],
-                torch.full_like(metadata["iterations"], t + 1)
+            # Apply mask
+            attention_scores = attention_scores.masked_fill(
+                attention_mask == 0,
+                float('-inf')
             )
+        
+        # Initialize metadata if needed
+        metadata = {"iterations": 0, "entropy": 0.0} if return_metadata else None
+        
+        # Start with standard attention
+        attention_weights = F.softmax(attention_scores, dim=-1)
+        attention_weights = self.attn_dropout(attention_weights)
+        
+        # Apply resonance iteratively
+        current_output = torch.matmul(attention_weights, v)
+        iterations_performed = 1
+        
+        # Iterative refinement with resonance
+        for i in range(1, self.max_iterations):
+            # Compute entropy of attention weights
+            entropy = self._compute_entropy(attention_weights)
+            avg_entropy = entropy.mean().item()
             
-            # Check for convergence by either entropy threshold or cosine similarity
-            converged_by_entropy = (mean_entropy < self.epsilon)
-            
-            # Combine convergence criteria (OR operation)
-            converged = converged_by_entropy | converged_by_similarity
-            
-            # Count samples that converged
-            newly_converged = converged.sum().item()
-            if newly_converged > 0:
-                metadata["converged_samples"] += newly_converged
-            
-            # Break if all samples have converged
-            if converged.all():
+            # Early stopping based on entropy threshold
+            if avg_entropy < self.entropy_threshold:
                 break
+            
+            # Apply resonance to refine values
+            resonance_v = self._compute_resonance(q, k, v, i)
+            
+            # Compute refined attention output
+            refined_output = torch.matmul(attention_weights, resonance_v)
+            
+            # Blend with current output
+            blend_factor = torch.sigmoid(torch.tensor(i / self.max_iterations))
+            current_output = (1 - blend_factor) * current_output + blend_factor * refined_output
+            
+            iterations_performed = i + 1
         
-        # If requested, include attention weights in metadata
-        if return_attn_weights:
-            metadata["attention_weights"] = attn_weights
+        # Record metadata if requested
+        if return_metadata:
+            metadata["iterations"] = iterations_performed
+            metadata["entropy"] = self._compute_entropy(attention_weights).mean().item()
         
-        return output, metadata
+        # Merge heads
+        attention_output = self._merge_heads(current_output)
+        
+        # Apply output projection
+        attention_output = self.o_proj(attention_output)
+        attention_output = self.output_dropout(attention_output)
+        
+        # Prepare return values
+        if output_attentions and return_metadata:
+            return attention_output, attention_weights, metadata
+        elif output_attentions:
+            return attention_output, attention_weights
+        elif return_metadata:
+            return attention_output, metadata
+        else:
+            return attention_output

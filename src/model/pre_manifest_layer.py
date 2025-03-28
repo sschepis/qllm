@@ -1,153 +1,132 @@
 """
-Pre-Manifest Resonance Layer Module.
+Pre-Manifest Layer for QLLM.
 
-This module implements the final specialized block that refines outputs in superposition,
-then collapses to a final distribution, as described in the Semantic Resonance Language Model paper.
+This module provides a specialized layer that transforms hidden states
+before they enter the attention mechanism, preparing them for quantum
+resonance operations by projecting them into a pre-manifest state.
 """
 
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Dict, Any, Optional, List, Tuple, Union
 
 
-class PreManifestResonanceLayer(nn.Module):
+class PreManifestLayer(nn.Module):
     """
-    Pre-Manifest Resonance Layer that attends over vocabulary embeddings and refines
-    the output representation before final distribution.
+    Layer that transforms hidden states into a pre-manifest state.
     
-    This layer ensures the model "thinks twice" about the final token, similar to
-    a quantum wavefunction being measured. If uncertain, it resonates through more
-    iterations until entropy is minimized.
+    This layer applies specialized transformations to prepare hidden states
+    for quantum resonance operations, creating a pre-manifest state that
+    enables more complex interactions and improved contextual understanding.
     """
     
-    def __init__(self, hidden_dim, vocab_size, embedding_weight=None, 
-                 max_iterations=5, epsilon=0.05, dropout=0.1):
+    def __init__(
+        self,
+        hidden_dim: int,
+        prime: int = 7,
+        base_dim: int = 32,
+        activation: str = "gelu",
+        normalize_output: bool = True
+    ):
         """
-        Initialize the Pre-Manifest Resonance Layer.
+        Initialize the pre-manifest layer.
         
         Args:
-            hidden_dim (int): Size of the hidden dimension
-            vocab_size (int): Size of the vocabulary
-            embedding_weight (torch.Tensor, optional): Weight matrix from embeddings to share parameters
-            max_iterations (int): Maximum number of refinement iterations
-            epsilon (float): Entropy threshold for halting
-            dropout (float): Dropout probability
+            hidden_dim: Dimension of hidden states
+            prime: Prime number for resonance patterns
+            base_dim: Base dimension for transformations
+            activation: Activation function to use
+            normalize_output: Whether to normalize the output
         """
         super().__init__()
         
         self.hidden_dim = hidden_dim
-        self.vocab_size = vocab_size
-        self.max_iterations = max_iterations
-        self.epsilon = epsilon
+        self.prime = prime
+        self.base_dim = base_dim
+        self.normalize_output = normalize_output
         
-        # If shared weights are provided, use them, otherwise create new weights
-        if embedding_weight is not None:
-            self.embedding_weight = embedding_weight
+        # Create prime-based projection matrices
+        self.low_rank_proj_down = nn.Linear(hidden_dim, base_dim)
+        self.low_rank_proj_up = nn.Linear(base_dim, hidden_dim)
+        
+        # Activation function
+        if activation == "gelu":
+            self.activation = F.gelu
+        elif activation == "relu":
+            self.activation = F.relu
+        elif activation == "silu":
+            self.activation = F.silu
         else:
-            self.embedding_weight = nn.Parameter(torch.randn(vocab_size, hidden_dim))
-            nn.init.normal_(self.embedding_weight, mean=0.0, std=0.02)
+            self.activation = F.gelu
         
-        # Query projection for attention
-        self.query_proj = nn.Linear(hidden_dim, hidden_dim)
+        # Prime-based modulation
+        self.register_buffer("prime_factors", self._create_prime_factors())
         
-        # Output projection
-        self.output_proj = nn.Linear(hidden_dim, hidden_dim)
-        
-        # Bias term
-        self.bias = nn.Parameter(torch.zeros(vocab_size))
-        
-        # Layer normalization
-        self.layer_norm = nn.LayerNorm(hidden_dim)
-        
-        # Dropout
-        self.dropout = nn.Dropout(dropout)
+        # Gate for controlling transformation strength
+        self.transform_gate = nn.Linear(hidden_dim, hidden_dim)
     
-    def compute_entropy(self, probs):
+    def _create_prime_factors(self) -> torch.Tensor:
         """
-        Compute Shannon entropy of token distribution.
+        Create prime-based factors for modulation.
+        
+        Returns:
+            Prime factors tensor
+        """
+        # Create factors based on prime number
+        factors = torch.zeros(self.hidden_dim)
+        
+        for i in range(self.hidden_dim):
+            # Create unique pattern based on the prime
+            angle = 2 * math.pi * (i % self.prime) / self.prime
+            factors[i] = 0.5 + 0.5 * math.cos(angle)
+        
+        return factors
+    
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        Transform hidden states into a pre-manifest state.
         
         Args:
-            probs (torch.Tensor): Token probabilities of shape [batch_size, seq_len, vocab_size]
+            hidden_states: Input hidden states [batch_size, seq_len, hidden_dim]
             
         Returns:
-            torch.Tensor: Entropy values of shape [batch_size, seq_len]
+            Transformed hidden states
         """
-        # Add small epsilon to avoid log(0)
-        probs = probs + 1e-10
+        # Apply low-rank projection
+        projected = self.low_rank_proj_down(hidden_states)
+        projected = self.activation(projected)
+        projected = self.low_rank_proj_up(projected)
         
-        # Compute entropy: -∑ p_i * log(p_i)
-        entropy = -torch.sum(probs * torch.log(probs), dim=-1)  # [batch_size, seq_len]
+        # Apply prime-based modulation
+        modulated = projected * self.prime_factors
         
-        return entropy
-    
-    def forward(self, hidden_states, attention_mask=None, return_iterations=False):
-        """
-        Forward pass with iterative refinement until entropy is minimized.
+        # Apply gate to control transformation strength
+        gate = torch.sigmoid(self.transform_gate(hidden_states))
+        transformed = hidden_states * (1 - gate) + modulated * gate
         
-        Args:
-            hidden_states (torch.Tensor): Hidden states from previous layer [batch_size, seq_len, hidden_dim]
-            attention_mask (torch.Tensor, optional): Attention mask [batch_size, seq_len]
-            return_iterations (bool): Whether to return iteration count
-            
-        Returns:
-            torch.Tensor: Logits of shape [batch_size, seq_len, vocab_size]
-            dict: Metadata including entropy and iterations
-        """
-        batch_size, seq_len, _ = hidden_states.shape
-        
-        # Apply layer normalization
-        hidden_states = self.layer_norm(hidden_states)
-        
-        # Initialize metadata
-        metadata = {
-            "entropy": torch.zeros(batch_size, seq_len, device=hidden_states.device),
-            "iterations": torch.zeros(batch_size, seq_len, dtype=torch.long, device=hidden_states.device)
-        }
-        
-        # Initial query projection
-        query = self.query_proj(hidden_states)  # [batch_size, seq_len, hidden_dim]
-        
-        # Iterative refinement
-        for t in range(self.max_iterations):
-            # Compute attention scores with vocabulary embeddings
-            # [batch_size, seq_len, hidden_dim] @ [vocab_size, hidden_dim]^T -> [batch_size, seq_len, vocab_size]
-            attn_scores = torch.matmul(query, self.embedding_weight.transpose(0, 1))
-            
-            # Add bias
-            attn_scores = attn_scores + self.bias
-            
-            # Apply attention mask if provided
-            if attention_mask is not None:
-                # Convert mask to additive mask (0 for tokens to keep, large negative for tokens to mask)
-                additive_mask = (1.0 - attention_mask.unsqueeze(-1)) * -10000.0
-                attn_scores = attn_scores + additive_mask
-            
-            # Compute token probabilities
-            token_probs = F.softmax(attn_scores, dim=-1)  # [batch_size, seq_len, vocab_size]
-            
-            # Compute entropy of token distribution
-            entropy = self.compute_entropy(token_probs)  # [batch_size, seq_len]
-            metadata["entropy"] = entropy
-            
-            # Update iteration count
-            metadata["iterations"] = torch.maximum(
-                metadata["iterations"],
-                torch.full_like(metadata["iterations"], t + 1)
+        # Normalize if required
+        if self.normalize_output:
+            transformed = F.layer_norm(
+                transformed,
+                [self.hidden_dim],
+                weight=None,
+                bias=None
             )
-            
-            # Check entropy-based halting condition
-            if (entropy < self.epsilon).all():
-                break
-            
-            # If not halted, compute weighted embeddings for next iteration
-            # [batch_size, seq_len, vocab_size] @ [vocab_size, hidden_dim] -> [batch_size, seq_len, hidden_dim]
-            weighted_embeddings = torch.matmul(token_probs, self.embedding_weight)
-            
-            # Update query for next iteration
-            query = query + self.dropout(self.output_proj(weighted_embeddings))
         
-        # Final attention scores for logits
-        logits = torch.matmul(query, self.embedding_weight.transpose(0, 1)) + self.bias
+        return transformed
+    
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Get layer configuration.
         
-        return logits, metadata
+        Returns:
+            Configuration dictionary
+        """
+        return {
+            "hidden_dim": self.hidden_dim,
+            "prime": self.prime,
+            "base_dim": self.base_dim,
+            "normalize_output": self.normalize_output
+        }

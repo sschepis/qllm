@@ -1,0 +1,39 @@
+{
+  "multimodal": {
+    "enabled": true,
+    "vision_encoder_type": "resnet",
+    "vision_encoder_model": "resnet50",
+    "vision_embedding_dim": 768,
+    "vision_primes": [11, 13, 17, 19, 23],
+    "audio_enabled": false,
+    "fusion_type": "attention",
+    "fusion_heads": 8,
+    "fusion_dropout": 0.1
+  },
+  "memory": {
+    "enabled": true,
+    "memory_size": 10000,
+    "memory_key_dim": 128,
+    "memory_value_dim": 768,
+    "use_graph_structure": true,
+    "max_relations": 5,
+    "num_neighbors": 10,
+    "use_importance_sampling": true,
+    "persistence_enabled": true,
+    "persistence_path": "memory/knowledge_graph.pkl"
+  },
+  "quantum": {
+    "enabled": false,
+    "group_type": "cyclic",
+    "group_order": 5,
+    "mask_type": "mod",
+    "mask_sparsity": 0.8
+  },
+  "feature_flags": {
+    "multimodal.vision": true,
+    "multimodal.audio": false,
+    "memory.graph": true,
+    "memory.persistence": true,
+    "quantum.equivariant": false
+  }
+}

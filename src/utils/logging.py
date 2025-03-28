@@ -8,7 +8,7 @@ Language Model, including setup for file and console logging.
 import os
 import sys
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any
 
 
 def setup_logger(
@@ -67,16 +67,23 @@ def setup_logger(
 class TrainingLogger:
     """Logger for training progress with detailed metrics."""
     
-    def __init__(self, logger: Optional[logging.Logger] = None, log_interval: int = 10):
+    def __init__(
+        self, 
+        logger: Optional[logging.Logger] = None, 
+        log_interval: int = 10,
+        verbose: bool = True
+    ):
         """
         Initialize training logger.
         
         Args:
             logger: Logger instance (if None, a new one is created)
             log_interval: How often to log detailed metrics
+            verbose: Whether to output detailed logs
         """
-        self.logger = logger or setup_logger("training")
+        self.logger = logger or setup_logger("qllm.training")
         self.log_interval = log_interval
+        self.verbose = verbose
         self.last_log_time = 0
     
     def start_epoch(self, epoch: int, max_epochs: int) -> None:
@@ -106,7 +113,8 @@ class TrainingLogger:
         batch_size: int,
         total_batches: int,
         loss: float,
-        learning_rate: float
+        learning_rate: float,
+        additional_metrics: Optional[Dict[str, Any]] = None
     ) -> None:
         """
         Log batch metrics.
@@ -118,15 +126,26 @@ class TrainingLogger:
             total_batches: Total number of batches
             loss: Batch loss
             learning_rate: Current learning rate
+            additional_metrics: Optional additional metrics to log
         """
+        if not self.verbose:
+            return
+
         if batch % self.log_interval == 0:
             progress = batch / total_batches * 100
-            self.logger.info(
+            log_message = (
                 f"Epoch {epoch+1}, Batch {batch}/{total_batches} ({progress:.1f}%) "
                 f"- Loss: {loss:.4f}, LR: {learning_rate:.6f}"
             )
+            
+            # Add additional metrics if provided
+            if additional_metrics:
+                metrics_str = ", ".join(f"{k}: {v:.4f}" for k, v in additional_metrics.items())
+                log_message += f" - {metrics_str}"
+                
+            self.logger.info(log_message)
     
-    def log_validation(self, metrics: dict) -> None:
+    def log_validation(self, metrics: Dict[str, Any]) -> None:
         """
         Log validation metrics.
         
@@ -181,3 +200,67 @@ class TrainingLogger:
             self.logger.warning("Memory logging requires psutil. Install with 'pip install psutil'")
         except Exception as e:
             self.logger.warning(f"Memory logging failed: {e}")
+
+
+def get_logger(name: str = "qllm") -> logging.Logger:
+    """
+    Get an existing logger or create a new one.
+    
+    Args:
+        name: Name of the logger
+        
+    Returns:
+        Logger instance
+    """
+    return logging.getLogger(name)
+
+
+def log_training_progress(
+    logger: logging.Logger,
+    epoch: int, 
+    step: int, 
+    total_steps: int,
+    loss: float,
+    learning_rate: float,
+    additional_info: Optional[Dict[str, Any]] = None
+) -> None:
+    """
+    Log training progress in a standardized format.
+    
+    Args:
+        logger: Logger instance
+        epoch: Current epoch
+        step: Current step
+        total_steps: Total steps per epoch
+        loss: Current loss value
+        learning_rate: Current learning rate
+        additional_info: Additional information to log
+    """
+    progress_pct = step / total_steps * 100 if total_steps > 0 else 0
+    message = f"Epoch {epoch}, Step {step}/{total_steps} ({progress_pct:.1f}%) - Loss: {loss:.4f}, LR: {learning_rate:.6f}"
+    
+    if additional_info:
+        additional_str = ", ".join(f"{k}: {v}" for k, v in additional_info.items())
+        message += f" - {additional_str}"
+    
+    logger.info(message)
+
+
+def log_evaluation_results(
+    logger: logging.Logger,
+    metrics: Dict[str, Any],
+    prefix: str = "Evaluation"
+) -> None:
+    """
+    Log evaluation results in a standardized format.
+    
+    Args:
+        logger: Logger instance
+        metrics: Dictionary of metrics
+        prefix: Prefix for the log message
+    """
+    metrics_str = ", ".join(
+        f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}"
+        for k, v in metrics.items()
+    )
+    logger.info(f"{prefix}: {metrics_str}")

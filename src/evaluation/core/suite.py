@@ -1,541 +1,347 @@
 """
-Core evaluation suite for QLLM extensions.
+Evaluation suite for QLLM.
 
-This module provides the main EvaluationSuite class for coordinating
-comprehensive evaluations of QLLM models and their extensions.
+This module provides the base evaluation suite class that defines the
+core functionality for model evaluation, with a consistent interface
+that specialized evaluation suites can extend.
 """
 
 import os
-import time
 import json
-import torch
-from typing import Dict, List, Any, Optional, Tuple, Union
+import time
+import datetime
+import logging
+from typing import Dict, Any, List, Tuple, Union, Optional, Callable, Set
 
-# Import from refactored modules
-from src.evaluation.core.model_utils import initialize_evaluation_model
+import torch
+import numpy as np
+
 from src.evaluation.core.config import EvaluationConfig
-from src.evaluation.utils.serialization import make_serializable, save_results_to_json
-from src.evaluation.metrics import (
-    # General metrics
-    perplexity,
-    parameter_efficiency,
-    memory_usage,
-    inference_speed,
-    generation_diversity,
-    
-    # Extension-specific evaluations
-    evaluate_multimodal_extension,
-    evaluate_memory_extension,
-    evaluate_quantum_extension
-)
+from src.evaluation.core.model_utils import ModelUtils, load_model, prepare_model_for_evaluation
+
+logger = logging.getLogger("qllm.evaluation")
 
 
 class EvaluationSuite:
     """
-    Comprehensive evaluation suite for QLLM extensions.
+    Base class for evaluation suites.
     
-    This class provides a framework for running evaluations on the QLLM model
-    and its extensions, collecting metrics, and reporting results.
+    This class provides the core functionality for model evaluation,
+    including loading models, preparing data, running evaluations,
+    and saving results. It defines a consistent interface that
+    specialized evaluation suites can extend.
     """
     
     def __init__(
         self,
-        model: Optional[torch.nn.Module] = None,
-        model_config: Optional[Dict[str, Any]] = None,
-        output_dir: str = "evaluation_results",
-        device: str = None
+        config: EvaluationConfig,
+        model: Optional[Any] = None,
+        tokenizer: Optional[Any] = None,
+        metrics_registry: Optional[Dict[str, Callable]] = None
     ):
         """
         Initialize the evaluation suite.
         
         Args:
-            model: Pre-initialized model (optional)
-            model_config: Configuration for creating a model if none provided
-            output_dir: Directory for storing evaluation results
-            device: Device to run evaluation on (defaults to auto-detection)
+            config: Evaluation configuration
+            model: Pre-loaded model (if None, will load from config)
+            tokenizer: Pre-loaded tokenizer (if None, will load with model)
+            metrics_registry: Registry of metric functions (name -> function)
         """
+        self.config = config
         self.model = model
-        self.model_config = model_config or {}
-        self.output_dir = output_dir
-        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        self.tokenizer = tokenizer
         
-        # Create output directory if it doesn't exist
-        os.makedirs(output_dir, exist_ok=True)
+        # Load metrics registry if not provided
+        self.metrics_registry = metrics_registry or self._load_metrics_registry()
         
-        # Results storage
-        self.results = {
-            "multimodal": {},
-            "memory": {},
-            "quantum": {},
-            "integrated": {},
-            "baseline": {}
-        }
+        # Initialize data storage
+        self.evaluation_data = None
+        self.results = {}
+        self.start_time = None
+        self.end_time = None
         
-        # Initialize model if not provided
-        if self.model is None and self.model_config:
-            self.model = initialize_evaluation_model(self.model_config, self.device)
+        # Create model utilities
+        self.model_utils = ModelUtils()
     
-    def run_evaluation(
-        self,
-        eval_config: Union[Dict[str, Any], EvaluationConfig]
-    ) -> Dict[str, Any]:
+    def _load_metrics_registry(self) -> Dict[str, Callable]:
         """
-        Run a comprehensive evaluation based on configuration.
+        Load the metrics registry.
         
-        Args:
-            eval_config: Configuration for the evaluation run
-                {
-                    "extensions_to_evaluate": ["multimodal", "memory", "quantum"],
-                    "metrics": ["perplexity", "parameter_efficiency", ...],
-                    "datasets": {...},
-                    "ablation_studies": [...],
-                    ...
-                }
-            
+        Returns:
+            Dictionary mapping metric names to metric functions
+        """
+        # Import the metrics registry
+        try:
+            from src.evaluation.metrics import get_metric_registry
+            return get_metric_registry()
+        except ImportError:
+            logger.warning("Could not import metrics registry")
+            return {}
+    
+    def load_model(self) -> Tuple[Any, Any]:
+        """
+        Load the model for evaluation.
+        
+        Returns:
+            Tuple of (model, tokenizer)
+        """
+        if self.model is not None and self.tokenizer is not None:
+            logger.info("Using pre-loaded model and tokenizer")
+            return self.model, self.tokenizer
+        
+        logger.info(f"Loading model: {self.config.model_id}")
+        
+        # Load model and tokenizer
+        self.model, self.tokenizer = load_model(
+            model_path=self.config.model_id,
+            device=self.config.device,
+            precision=self.config.precision
+        )
+        
+        # Prepare model and tokenizer for evaluation
+        self.model, self.tokenizer = prepare_model_for_evaluation(
+            model=self.model,
+            tokenizer=self.tokenizer,
+            max_length=self.config.max_length
+        )
+        
+        return self.model, self.tokenizer
+    
+    def prepare_data(self) -> Any:
+        """
+        Prepare evaluation data.
+        
+        This method should be implemented by subclasses to load and prepare
+        the specific data needed for their evaluation.
+        
+        Returns:
+            Prepared evaluation data
+        """
+        raise NotImplementedError("Subclasses must implement prepare_data()")
+    
+    def run_evaluation(self) -> Dict[str, Any]:
+        """
+        Run the evaluation.
+        
+        This method orchestrates the evaluation process, including loading
+        the model, preparing the data, running the metrics, and aggregating
+        the results.
+        
         Returns:
             Dictionary of evaluation results
         """
-        print("\n=== Starting Comprehensive Evaluation ===\n")
+        # Record start time
+        self.start_time = time.time()
         
-        # Convert dict config to EvaluationConfig if needed
-        if isinstance(eval_config, dict):
-            config = EvaluationConfig(eval_config)
-        else:
-            config = eval_config
+        # Load model and tokenizer if not already loaded
+        if self.model is None or self.tokenizer is None:
+            self.load_model()
         
-        # Extract configuration
-        extensions = config.get("extensions_to_evaluate", ["multimodal", "memory", "quantum"])
-        metrics = config.get("metrics", ["perplexity", "parameter_efficiency"])
-        datasets = config.get("datasets", {})
-        run_ablation = config.get("run_ablation_studies", True)
+        # Prepare evaluation data if not already prepared
+        if self.evaluation_data is None:
+            logger.info("Preparing evaluation data")
+            self.evaluation_data = self.prepare_data()
         
-        # Ensure model is available
-        if self.model is None:
-            raise ValueError("Model not initialized. Provide a model or model_config.")
+        # Run each metric
+        metric_results = {}
+        for metric_name in self.config.metrics:
+            try:
+                # Get metric function
+                metric_fn = self.metrics_registry.get(metric_name)
+                if metric_fn is None:
+                    logger.warning(f"Unknown metric: {metric_name}")
+                    continue
+                
+                # Run metric
+                logger.info(f"Running metric: {metric_name}")
+                result = self._run_metric(metric_fn, metric_name)
+                
+                # Store result
+                metric_results[metric_name] = result
+                
+            except Exception as e:
+                logger.error(f"Error running metric {metric_name}: {e}")
+                metric_results[metric_name] = {"error": str(e)}
         
-        # Run baseline evaluation (no extensions)
-        if "baseline" in extensions or run_ablation:
-            print("\nEvaluating baseline model (no extensions)...")
-            self.results["baseline"] = self._evaluate_configuration(
-                enabled_extensions=[],
-                metrics=metrics,
-                datasets=datasets
-            )
+        # Record end time
+        self.end_time = time.time()
         
-        # Evaluate each extension individually
-        for ext in ["multimodal", "memory", "quantum"]:
-            if ext in extensions:
-                print(f"\nEvaluating {ext} extension...")
-                self.results[ext] = self._evaluate_configuration(
-                    enabled_extensions=[ext],
-                    metrics=metrics,
-                    datasets=datasets
-                )
+        # Aggregate results
+        self.results = self._aggregate_results(metric_results)
         
-        # Evaluate all extensions together
-        if "integrated" in extensions or len(extensions) > 1:
-            print("\nEvaluating all extensions together...")
-            enabled = [ext for ext in ["multimodal", "memory", "quantum"] if ext in extensions]
-            self.results["integrated"] = self._evaluate_configuration(
-                enabled_extensions=enabled,
-                metrics=metrics,
-                datasets=datasets
-            )
-        
-        # Run ablation studies if requested
-        if run_ablation:
-            print("\nRunning ablation studies...")
-            self._run_ablation_studies(metrics, datasets)
-        
-        # Generate summary report
-        summary = self._generate_summary()
-        
-        # Save results
-        self._save_results()
-        
-        print("\n=== Evaluation Completed ===\n")
-        return summary
+        # Return results
+        return self.results
     
-    def _evaluate_configuration(
-        self,
-        enabled_extensions: List[str],
-        metrics: List[str],
-        datasets: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    def _run_metric(self, metric_fn: Callable, metric_name: str) -> Dict[str, Any]:
         """
-        Evaluate a specific configuration of extensions.
+        Run a single metric.
         
         Args:
-            enabled_extensions: List of extensions to enable
-            metrics: List of metrics to compute
-            datasets: Datasets to use for evaluation
+            metric_fn: Function implementing the metric
+            metric_name: Name of the metric
             
         Returns:
-            Dictionary of evaluation results
+            Dictionary with metric results
         """
-        # Configure model with specified extensions
-        self.model.reset_extensions()
+        # Run the metric
+        try:
+            metric_start_time = time.time()
+            
+            # Call the metric function
+            result = metric_fn(
+                model=self.model,
+                tokenizer=self.tokenizer,
+                data=self.evaluation_data,
+                config=self.config
+            )
+            
+            metric_end_time = time.time()
+            
+            # Ensure result is a dictionary
+            if not isinstance(result, dict):
+                result = {"value": result}
+            
+            # Add execution time
+            result["execution_time"] = metric_end_time - metric_start_time
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error in metric {metric_name}: {e}")
+            return {"error": str(e)}
+    
+    def _aggregate_results(self, metric_results: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Aggregate evaluation results.
         
-        # Enable specified extensions
-        for ext in enabled_extensions:
-            if ext == "multimodal":
-                self.model.enable_multimodal_extension()
-            elif ext == "memory":
-                self.model.enable_memory_extension()
-            elif ext == "quantum":
-                self.model.enable_quantum_extension()
+        Args:
+            metric_results: Dictionary mapping metric names to results
+            
+        Returns:
+            Dictionary with aggregated results
+        """
+        # Calculate overall score if possible
+        overall_score = None
+        weighted_sum = 0
+        total_weight = 0
         
-        # Initialize results
+        # Try to compute weighted average of scores
+        for metric_name, result in metric_results.items():
+            if "value" in result and isinstance(result["value"], (int, float)):
+                # Get weight for this metric (default to 1.0)
+                weight = getattr(self.config, f"{metric_name}_weight", 1.0)
+                
+                # Add to weighted sum
+                weighted_sum += result["value"] * weight
+                total_weight += weight
+        
+        # Calculate overall score if we have valid metrics
+        if total_weight > 0:
+            overall_score = weighted_sum / total_weight
+        
+        # Create results dictionary
         results = {
-            "enabled_extensions": enabled_extensions,
-            "metrics": {}
+            "model_id": self.config.model_id,
+            "metrics": metric_results,
+            "overall_score": overall_score,
+            "execution_time": (self.end_time - self.start_time) if self.end_time else None,
+            "timestamp": datetime.datetime.now().isoformat(),
+            "config": self.config.to_dict()
         }
-        
-        # Evaluate each metric
-        for metric in metrics:
-            print(f"  Evaluating metric: {metric}")
-            
-            if metric == "perplexity":
-                results["metrics"][metric] = self._evaluate_perplexity(datasets.get("text", []))
-            
-            elif metric == "parameter_efficiency":
-                results["metrics"][metric] = parameter_efficiency(self.model)
-            
-            elif metric == "memory_usage":
-                results["metrics"][metric] = memory_usage(self.model)
-            
-            elif metric == "inference_speed":
-                results["metrics"][metric] = inference_speed(
-                    self.model, 
-                    datasets.get("inference_inputs", [])
-                )
-            
-            elif metric == "generation_diversity":
-                results["metrics"][metric] = generation_diversity(
-                    self.model,
-                    datasets.get("generation_prompts", [])
-                )
-        
-        # Extension-specific evaluations
-        if "multimodal" in enabled_extensions:
-            results["multimodal_metrics"] = evaluate_multimodal_extension(self.model, datasets)
-        
-        if "memory" in enabled_extensions:
-            results["memory_metrics"] = evaluate_memory_extension(self.model, datasets)
-        
-        if "quantum" in enabled_extensions:
-            results["quantum_metrics"] = evaluate_quantum_extension(self.model, datasets)
         
         return results
     
-    def _evaluate_perplexity(self, test_texts: List[str]) -> Dict[str, float]:
+    def save_results(self, filepath: Optional[str] = None) -> str:
         """
-        Evaluate perplexity on test texts.
+        Save evaluation results to file.
         
         Args:
-            test_texts: List of texts for perplexity evaluation
+            filepath: Path to save results to (if None, uses config.output_dir)
             
         Returns:
-            Dictionary with perplexity metrics
+            Path to the saved results file
         """
-        if not test_texts:
-            return {"error": "No test texts provided for perplexity evaluation"}
-        
-        perplexities = []
-        
-        for text in test_texts:
-            try:
-                ppl = perplexity(self.model, text)
-                perplexities.append(ppl)
-            except Exception as e:
-                print(f"Error calculating perplexity: {str(e)}")
-        
-        if not perplexities:
-            return {"error": "Failed to calculate perplexity for any test texts"}
-        
-        return {
-            "mean": sum(perplexities) / len(perplexities),
-            "min": min(perplexities),
-            "max": max(perplexities),
-            "values": perplexities
-        }
-    
-    def _run_ablation_studies(
-        self,
-        metrics: List[str],
-        datasets: Dict[str, Any]
-    ) -> None:
-        """
-        Run ablation studies to measure contributions of each extension.
-        
-        Args:
-            metrics: List of metrics to evaluate
-            datasets: Evaluation datasets
-        """
-        ablation_results = {}
-        
-        # Baseline (no extensions)
-        ablation_results["none"] = self._evaluate_configuration([], metrics, datasets)
-        
-        # Individual extensions
-        for ext in ["multimodal", "memory", "quantum"]:
-            ablation_results[ext] = self._evaluate_configuration([ext], metrics, datasets)
-        
-        # Pairs of extensions
-        pairs = [
-            ["multimodal", "memory"],
-            ["multimodal", "quantum"],
-            ["memory", "quantum"]
-        ]
-        
-        for pair in pairs:
-            pair_name = "+".join(pair)
-            ablation_results[pair_name] = self._evaluate_configuration(pair, metrics, datasets)
-        
-        # All extensions
-        ablation_results["all"] = self._evaluate_configuration(
-            ["multimodal", "memory", "quantum"], 
-            metrics, 
-            datasets
-        )
-        
-        # Store ablation results
-        self.results["ablation_studies"] = ablation_results
-    
-    def _generate_summary(self) -> Dict[str, Any]:
-        """
-        Generate a summary of evaluation results.
-        
-        Returns:
-            Dictionary with evaluation summary
-        """
-        summary = {
-            "configurations_evaluated": list(self.results.keys()),
-            "metrics_evaluated": set()
-        }
-        
-        # Collect all metrics evaluated
-        for config_name, config_results in self.results.items():
-            if config_name == "ablation_studies":
-                continue
-                
-            if "metrics" in config_results:
-                for metric in config_results["metrics"].keys():
-                    summary["metrics_evaluated"].add(metric)
-        
-        summary["metrics_evaluated"] = list(summary["metrics_evaluated"])
-        
-        # Get best configuration for each metric
-        summary["best_configurations"] = {}
-        
-        for metric in summary["metrics_evaluated"]:
-            best_config = None
-            best_value = None
+        # Generate filepath if not provided
+        if filepath is None:
+            if not self.config.output_dir:
+                raise ValueError("No output directory specified in config")
             
-            for config_name, config_results in self.results.items():
-                if config_name == "ablation_studies":
-                    continue
-                    
-                if "metrics" in config_results and metric in config_results["metrics"]:
-                    metric_data = config_results["metrics"][metric]
-                    
-                    # Extract value based on metric format
-                    if isinstance(metric_data, dict) and "mean" in metric_data:
-                        value = metric_data["mean"]
-                    elif isinstance(metric_data, dict) and "value" in metric_data:
-                        value = metric_data["value"]
-                    elif isinstance(metric_data, (int, float)):
-                        value = metric_data
-                    else:
-                        continue
-                    
-                    # Determine if this is better
-                    # Note: For some metrics like perplexity, lower is better
-                    # We assume lower is better for "perplexity" metric
-                    if metric == "perplexity":
-                        if best_value is None or value < best_value:
-                            best_value = value
-                            best_config = config_name
-                    else:
-                        # For other metrics, higher is assumed to be better
-                        if best_value is None or value > best_value:
-                            best_value = value
-                            best_config = config_name
+            # Create output directory if it doesn't exist
+            os.makedirs(self.config.output_dir, exist_ok=True)
             
-            if best_config and best_value is not None:
-                summary["best_configurations"][metric] = {
-                    "configuration": best_config,
-                    "value": best_value
-                }
+            # Generate filename
+            model_name = os.path.basename(self.config.model_id.rstrip("/"))
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            filepath = os.path.join(
+                self.config.output_dir,
+                f"{model_name}_results_{timestamp}.json"
+            )
         
-        # Add ablation insights if available
-        if "ablation_studies" in self.results:
-            summary["ablation_insights"] = self._analyze_ablation_studies()
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
         
-        return summary
-    
-    def _analyze_ablation_studies(self) -> Dict[str, Any]:
-        """
-        Analyze ablation studies to determine extension contributions.
-        
-        Returns:
-            Dictionary with ablation analysis
-        """
-        if "ablation_studies" not in self.results:
-            return {}
-            
-        ablation_studies = self.results["ablation_studies"]
-        insights = {}
-        
-        # Check which metrics we have in the ablation studies
-        available_metrics = set()
-        for config_results in ablation_studies.values():
-            if "metrics" in config_results:
-                for metric in config_results["metrics"].keys():
-                    available_metrics.add(metric)
-        
-        for metric in available_metrics:
-            # Extract baseline value (no extensions)
-            if "none" in ablation_studies and "metrics" in ablation_studies["none"] and metric in ablation_studies["none"]["metrics"]:
-                baseline_data = ablation_studies["none"]["metrics"][metric]
-                
-                if isinstance(baseline_data, dict) and "mean" in baseline_data:
-                    baseline = baseline_data["mean"]
-                elif isinstance(baseline_data, dict) and "value" in baseline_data:
-                    baseline = baseline_data["value"]
-                elif isinstance(baseline_data, (int, float)):
-                    baseline = baseline_data
-                else:
-                    continue
-                
-                contributions = {}
-                
-                # Calculate individual contributions
-                for ext in ["multimodal", "memory", "quantum"]:
-                    if ext in ablation_studies and "metrics" in ablation_studies[ext] and metric in ablation_studies[ext]["metrics"]:
-                        ext_data = ablation_studies[ext]["metrics"][metric]
-                        
-                        if isinstance(ext_data, dict) and "mean" in ext_data:
-                            ext_value = ext_data["mean"]
-                        elif isinstance(ext_data, dict) and "value" in ext_data:
-                            ext_value = ext_data["value"]
-                        elif isinstance(ext_data, (int, float)):
-                            ext_value = ext_data
-                        else:
-                            continue
-                            
-                        # Calculate improvement (or deterioration)
-                        if metric == "perplexity":  # Lower is better
-                            contribution = baseline - ext_value
-                            percent = (baseline - ext_value) / baseline * 100 if baseline > 0 else 0
-                        else:  # Higher is better
-                            contribution = ext_value - baseline
-                            percent = (ext_value - baseline) / baseline * 100 if baseline > 0 else 0
-                            
-                        contributions[ext] = {
-                            "absolute": contribution,
-                            "percent": percent
-                        }
-                
-                insights[metric] = {
-                    "baseline": baseline,
-                    "contributions": contributions
-                }
-                
-                # Add best combination
-                best_combo = None
-                best_value = None
-                
-                for combo_name, combo_results in ablation_studies.items():
-                    if combo_name == "none" or combo_name in ["multimodal", "memory", "quantum"]:
-                        continue
-                        
-                    if "metrics" in combo_results and metric in combo_results["metrics"]:
-                        combo_data = combo_results["metrics"][metric]
-                        
-                        if isinstance(combo_data, dict) and "mean" in combo_data:
-                            combo_value = combo_data["mean"]
-                        elif isinstance(combo_data, dict) and "value" in combo_data:
-                            combo_value = combo_data["value"]
-                        elif isinstance(combo_data, (int, float)):
-                            combo_value = combo_data
-                        else:
-                            continue
-                            
-                        if metric == "perplexity":  # Lower is better
-                            if best_value is None or combo_value < best_value:
-                                best_value = combo_value
-                                best_combo = combo_name
-                        else:  # Higher is better
-                            if best_value is None or combo_value > best_value:
-                                best_value = combo_value
-                                best_combo = combo_name
-                
-                if best_combo and best_value is not None:
-                    insights[metric]["best_combination"] = {
-                        "combination": best_combo,
-                        "value": best_value
-                    }
-        
-        return insights
-    
-    def _save_results(self) -> None:
-        """Save evaluation results to JSON file."""
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        output_file = os.path.join(self.output_dir, f"evaluation_results_{timestamp}.json")
-        
-        # Create a serializable version of the results
-        serializable_results = make_serializable(self.results)
+        # Convert results to JSON
+        results_json = json.dumps(self.results, indent=2)
         
         # Save to file
-        save_results_to_json(serializable_results, output_file)
+        with open(filepath, "w") as f:
+            f.write(results_json)
         
-        # Create a timestamped directory for additional results
-        eval_dir = os.path.join(self.output_dir, f"evaluation_{timestamp.replace('-', '_')}")
-        os.makedirs(eval_dir, exist_ok=True)
+        logger.info(f"Saved evaluation results to {filepath}")
+        return filepath
+    
+    @classmethod
+    def load_results(cls, filepath: str) -> Dict[str, Any]:
+        """
+        Load evaluation results from file.
         
-        # Save evaluation configuration
-        if hasattr(self, 'config'):
-            config_file = os.path.join(eval_dir, "evaluation_config.json")
-            with open(config_file, 'w') as f:
-                json.dump(make_serializable(self.config), f, indent=2)
+        Args:
+            filepath: Path to results file
+            
+        Returns:
+            Dictionary with evaluation results
+        """
+        with open(filepath, "r") as f:
+            results = json.load(f)
         
-        # Save evaluation summary
-        summary = self._generate_summary()
-        summary_file = os.path.join(eval_dir, "evaluation_summary.json")
-        with open(summary_file, 'w') as f:
-            json.dump(make_serializable(summary), f, indent=2)
+        return results
+    
+    @classmethod
+    def from_config_file(cls, config_path: str) -> 'EvaluationSuite':
+        """
+        Create an evaluation suite from a configuration file.
         
-        # Create visualizations directory
-        vis_dir = os.path.join(eval_dir, "visualizations")
-        os.makedirs(vis_dir, exist_ok=True)
+        Args:
+            config_path: Path to configuration file
+            
+        Returns:
+            Configured evaluation suite
+        """
+        # Load configuration
+        config = EvaluationConfig.load(config_path)
         
-        print(f"Results saved to {output_file}")
-        print(f"Summary saved to {summary_file}")
+        # Create suite
+        return cls(config=config)
 
 
-def run_evaluation_suite(config_path: str) -> Dict[str, Any]:
+def run_evaluation_from_config(config_path: str) -> Dict[str, Any]:
     """
-    Run the evaluation suite using a configuration file.
+    Run an evaluation from a configuration file.
     
     Args:
-        config_path: Path to evaluation configuration JSON file
+        config_path: Path to configuration file
         
     Returns:
-        Evaluation results summary
+        Dictionary with evaluation results
     """
-    # Load configuration
-    with open(config_path, 'r') as f:
-        config = json.load(f)
-    
     # Create evaluation suite
-    suite = EvaluationSuite(
-        model_config=config.get("model_config", {}),
-        output_dir=config.get("output_dir", "evaluation_results"),
-        device=config.get("device")
-    )
+    suite = EvaluationSuite.from_config_file(config_path)
     
     # Run evaluation
-    summary = suite.run_evaluation(config)
+    results = suite.run_evaluation()
     
-    return summary
+    # Save results
+    suite.save_results()
+    
+    return results

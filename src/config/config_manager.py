@@ -1,26 +1,69 @@
 """
-Configuration manager for the Quantum Resonance Language Model.
+Configuration manager for QLLM.
 
 This module provides utilities for loading, saving, and managing 
-configuration for model training and evaluation.
+configuration for model training and evaluation using the strategy pattern
+for flexible configuration handling.
 """
 
 import os
-import json
-from typing import Dict, Any, Optional, Union, List, Type
+import logging
+from typing import Dict, Any, Optional, Union, List, Type, TypeVar, Generic
+from dataclasses import is_dataclass, asdict
 
+from src.core.configuration import ConfigurationBase
+from src.config.config_strategy import (
+    ConfigurationStrategy, 
+    JsonConfigStrategy,
+    YamlConfigStrategy,
+    EnvConfigStrategy,
+    DictConfigStrategy,
+    ArgsConfigStrategy
+)
 from src.config.model_config import ModelConfig
 from src.config.training_config import TrainingConfig
 from src.config.data_config import DataConfig
 from src.config.config_schema import get_schema
 
+# Setup logger
+logger = logging.getLogger("qllm.config")
+
+# Type variable for configuration classes
+T = TypeVar('T', bound=ConfigurationBase)
+
 
 class ConfigManager:
-    """Manages configuration loading, saving, and validation."""
+    """
+    Configuration manager for QLLM.
+    
+    This class manages loading, validation, and saving of configurations
+    using the strategy pattern. It centralizes configuration handling and
+    eliminates code duplication across the codebase.
+    """
     
     def __init__(self):
         """Initialize the configuration manager."""
+        # Load the schema
         self.schema = get_schema()
+        
+        # Register default strategies
+        self.strategies = {
+            "json": JsonConfigStrategy(),
+            "yaml": YamlConfigStrategy(),
+            "env": EnvConfigStrategy(),
+            "dict": DictConfigStrategy(),
+            "args": ArgsConfigStrategy()
+        }
+    
+    def register_strategy(self, name: str, strategy: ConfigurationStrategy) -> None:
+        """
+        Register a new configuration strategy.
+        
+        Args:
+            name: Name of the strategy
+            strategy: Strategy implementation
+        """
+        self.strategies[name] = strategy
     
     def create_default_config(self) -> Dict[str, Dict[str, Any]]:
         """
@@ -39,25 +82,39 @@ class ConfigManager:
             "data": data_config,
         }
     
-    def load_config(self, config_path: str) -> Dict[str, Dict[str, Any]]:
+    def load_config(
+        self, 
+        config_path: str,
+        strategy: str = "json"
+    ) -> Dict[str, Dict[str, Any]]:
         """
-        Load configuration from a JSON file.
+        Load configuration from a file using the specified strategy.
         
         Args:
             config_path: Path to the configuration file
+            strategy: Name of the strategy to use
             
         Returns:
             Dictionary with configuration sections
             
         Raises:
+            ValueError: If the strategy is not registered
             FileNotFoundError: If the configuration file doesn't exist
-            json.JSONDecodeError: If the configuration file isn't valid JSON
         """
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+        if strategy not in self.strategies:
+            raise ValueError(f"Unknown configuration strategy: {strategy}")
         
-        with open(config_path, 'r') as f:
-            config = json.load(f)
+        # Get the strategy
+        strategy_impl = self.strategies[strategy]
+        
+        # Load the configuration
+        try:
+            config = strategy_impl.load(config_path)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+        except Exception as e:
+            logger.error(f"Error loading configuration from {config_path}: {e}")
+            raise
         
         # Ensure all sections exist
         for section in ["model", "training", "data"]:
@@ -66,17 +123,26 @@ class ConfigManager:
         
         return config
     
-    def save_config(self, config: Dict[str, Dict[str, Any]], config_path: str) -> None:
+    def save_config(
+        self, 
+        config: Dict[str, Dict[str, Any]], 
+        config_path: str,
+        strategy: str = "json"
+    ) -> None:
         """
-        Save configuration to a JSON file.
+        Save configuration to a file using the specified strategy.
         
         Args:
             config: Configuration dictionary to save
             config_path: Path to save the configuration to
+            strategy: Name of the strategy to use
             
         Raises:
-            ValueError: If the configuration is invalid
+            ValueError: If the configuration is invalid or the strategy is not registered
         """
+        if strategy not in self.strategies:
+            raise ValueError(f"Unknown configuration strategy: {strategy}")
+        
         # Validate configuration
         errors = self.schema.validate(config)
         if errors:
@@ -85,15 +151,24 @@ class ConfigManager:
                 error_msg += f"  - {error}\n"
             raise ValueError(error_msg)
         
+        # Get the strategy
+        strategy_impl = self.strategies[strategy]
+        
         # Create directory if it doesn't exist
         os.makedirs(os.path.dirname(os.path.abspath(config_path)), exist_ok=True)
         
         # Save configuration
-        with open(config_path, 'w') as f:
-            json.dump(config, f, indent=2)
+        try:
+            strategy_impl.save(config, config_path)
+        except Exception as e:
+            logger.error(f"Error saving configuration to {config_path}: {e}")
+            raise
     
-    def merge_configs(self, base_config: Dict[str, Dict[str, Any]], 
-                    override_config: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    def merge_configs(
+        self, 
+        base_config: Dict[str, Dict[str, Any]], 
+        override_config: Dict[str, Dict[str, Any]]
+    ) -> Dict[str, Dict[str, Any]]:
         """
         Merge two configurations, with override_config taking precedence.
         
@@ -118,7 +193,10 @@ class ConfigManager:
         
         return merged_config
     
-    def from_command_line_args(self, args: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    def from_command_line_args(
+        self, 
+        args: Dict[str, Any]
+    ) -> Dict[str, Dict[str, Any]]:
         """
         Create a configuration from command line arguments.
         
@@ -128,34 +206,14 @@ class ConfigManager:
         Returns:
             Configuration dictionary
         """
-        config = {
-            "model": {},
-            "training": {},
-            "data": {}
-        }
-        
-        # Map known arguments to their sections
-        for arg, value in args.items():
-            if value is None:
-                continue
-                
-            # Model arguments
-            if arg in ["hidden_dim", "num_layers", "num_heads", "dropout", "max_seq_length"]:
-                config["model"][arg] = value
-            
-            # Training arguments
-            elif arg in ["batch_size", "learning_rate", "weight_decay", "max_epochs", 
-                        "training_type", "device", "output_dir", "seed"]:
-                config["training"][arg] = value
-            
-            # Data arguments
-            elif arg in ["dataset_name", "tokenizer_name", "train_file", "validation_file", 
-                        "test_file", "max_length"]:
-                config["data"][arg] = value
-        
-        return config
+        # Use the Args strategy to convert command line arguments to config
+        strategy = self.strategies["args"]
+        return strategy.load(args)
     
-    def to_config_classes(self, config: Dict[str, Dict[str, Any]]) -> Dict[str, Union[ModelConfig, TrainingConfig, DataConfig]]:
+    def to_config_classes(
+        self, 
+        config: Dict[str, Dict[str, Any]]
+    ) -> Dict[str, Union[ModelConfig, TrainingConfig, DataConfig]]:
         """
         Convert a configuration dictionary to configuration classes.
         
@@ -175,7 +233,44 @@ class ConfigManager:
             "data": data_config
         }
     
-    def validate_config(self, config: Dict[str, Dict[str, Any]]) -> List[str]:
+    def from_config_classes(
+        self,
+        model_config: Optional[ModelConfig] = None,
+        training_config: Optional[TrainingConfig] = None,
+        data_config: Optional[DataConfig] = None
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Convert configuration classes to a configuration dictionary.
+        
+        Args:
+            model_config: Model configuration class instance
+            training_config: Training configuration class instance
+            data_config: Data configuration class instance
+            
+        Returns:
+            Configuration dictionary
+        """
+        config = {
+            "model": {},
+            "training": {},
+            "data": {}
+        }
+        
+        if model_config is not None:
+            config["model"] = model_config.to_dict()
+        
+        if training_config is not None:
+            config["training"] = training_config.to_dict()
+        
+        if data_config is not None:
+            config["data"] = data_config.to_dict()
+        
+        return config
+    
+    def validate_config(
+        self, 
+        config: Dict[str, Dict[str, Any]]
+    ) -> List[str]:
         """
         Validate a configuration against the schema.
         
@@ -186,45 +281,104 @@ class ConfigManager:
             List of error messages, empty if validation passes
         """
         return self.schema.validate(config)
-        
-    def model_config_to_dict(self, config: ModelConfig) -> Dict[str, Any]:
+    
+    def load_config_class(
+        self, 
+        config_path: str,
+        config_class: Type[T],
+        section: Optional[str] = None,
+        strategy: str = "json"
+    ) -> T:
         """
-        Convert a ModelConfig object to a dictionary.
-        
-        Args:
-            config: ModelConfig object
-            
-        Returns:
-            Dictionary representation of the config
-        """
-        if hasattr(config, "to_dict"):
-            return config.to_dict()
-        return vars(config)
-        
-    def training_config_to_dict(self, config: TrainingConfig) -> Dict[str, Any]:
-        """
-        Convert a TrainingConfig object to a dictionary.
+        Load a specific configuration class from a file.
         
         Args:
-            config: TrainingConfig object
+            config_path: Path to the configuration file
+            config_class: Configuration class to instantiate
+            section: Section to load from (if None, assumes the whole file is for this class)
+            strategy: Name of the strategy to use
             
         Returns:
-            Dictionary representation of the config
+            Configuration class instance
+            
+        Raises:
+            ValueError: If the strategy is not registered
+            FileNotFoundError: If the configuration file doesn't exist
         """
-        if hasattr(config, "to_dict"):
-            return config.to_dict()
-        return vars(config)
+        if strategy not in self.strategies:
+            raise ValueError(f"Unknown configuration strategy: {strategy}")
         
-    def data_config_to_dict(self, config: DataConfig) -> Dict[str, Any]:
+        # Get the strategy
+        strategy_impl = self.strategies[strategy]
+        
+        # Load the configuration
+        try:
+            config_data = strategy_impl.load(config_path)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+        except Exception as e:
+            logger.error(f"Error loading configuration from {config_path}: {e}")
+            raise
+        
+        # Extract section if specified
+        if section is not None and section in config_data:
+            config_data = config_data[section]
+        
+        # Convert to configuration class
+        if issubclass(config_class, ConfigurationBase):
+            return config_class.from_dict(config_data)
+        else:
+            # For regular classes, create instance and set attributes
+            instance = config_class()
+            for key, value in config_data.items():
+                if hasattr(instance, key):
+                    setattr(instance, key, value)
+            return instance
+    
+    def save_config_class(
+        self,
+        config_obj: T,
+        config_path: str,
+        section: Optional[str] = None,
+        strategy: str = "json"
+    ) -> None:
         """
-        Convert a DataConfig object to a dictionary.
+        Save a configuration class to a file.
         
         Args:
-            config: DataConfig object
+            config_obj: Configuration class instance
+            config_path: Path to save the configuration to
+            section: Section to save as (if None, saves the whole object)
+            strategy: Name of the strategy to use
             
-        Returns:
-            Dictionary representation of the config
+        Raises:
+            ValueError: If the strategy is not registered
         """
-        if hasattr(config, "to_dict"):
-            return config.to_dict()
-        return vars(config)
+        if strategy not in self.strategies:
+            raise ValueError(f"Unknown configuration strategy: {strategy}")
+        
+        # Convert configuration class to dictionary
+        if isinstance(config_obj, ConfigurationBase):
+            config_dict = config_obj.to_dict()
+        elif is_dataclass(config_obj):
+            config_dict = asdict(config_obj)
+        else:
+            config_dict = {k: v for k, v in config_obj.__dict__.items() 
+                          if not k.startswith('_')}
+        
+        # Wrap in section if specified
+        if section is not None:
+            config_dict = {section: config_dict}
+        
+        # Get the strategy
+        strategy_impl = self.strategies[strategy]
+        
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(os.path.abspath(config_path)), exist_ok=True)
+        
+        # Save configuration
+        try:
+            strategy_impl.save(config_dict, config_path)
+        except Exception as e:
+            logger.error(f"Error saving configuration to {config_path}: {e}")
+            raise

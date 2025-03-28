@@ -1,222 +1,191 @@
 """
-Resonance Block Module.
+Resonance Block for QLLM.
 
-This module implements a complete resonance block as described in the Semantic Resonance 
-Language Model paper, combining resonance attention, feed-forward layers with 
-prime-based masks, and residual connections.
+This module provides a transformer block enhanced with quantum resonance
+principles, replacing the standard transformer block for improved
+contextual understanding and information flow.
 """
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+from typing import Dict, Any, Optional, List, Tuple, Union
 
-from .resonance_attention import ResonanceAttention
-
-
-def create_prime_resonance_mask(dim, primes=[7, 11, 13, 17, 19]):
-    """
-    Create a structured mask based on prime resonance conditions.
-    
-    Args:
-        dim (int): Dimension of the weight matrix
-        primes (List[int]): List of prime numbers for resonance conditions
-    
-    Returns:
-        torch.Tensor: Boolean mask of shape [dim, dim]
-    """
-    mask = torch.zeros((dim, dim), dtype=torch.bool)
-    
-    # Set indices to 1 if they pass the prime resonance condition
-    for i in range(dim):
-        for j in range(dim):
-            # Example condition: (i-j) mod p = 0 for some prime p
-            if any((i-j) % p == 0 for p in primes):
-                mask[i, j] = True
-                
-    return mask
-
-
-class MaskedFeedForward(nn.Module):
-    """
-    Feed-forward layer with prime resonance mask.
-    
-    The mask ensures structured sparsity guided by prime-based frequency analysis,
-    reducing parameter count while maintaining model capacity.
-    """
-    
-    def __init__(self, hidden_dim, ff_dim, primes=[7, 11, 13, 17, 19], dropout=0.1):
-        """
-        Initialize the masked feed-forward layer.
-        
-        Args:
-            hidden_dim (int): Hidden dimension size
-            ff_dim (int): Feed-forward inner dimension size
-            primes (List[int]): Primes used for resonance mask
-            dropout (float): Dropout probability
-        """
-        super().__init__()
-        
-        self.hidden_dim = hidden_dim
-        self.ff_dim = ff_dim
-        self.primes = primes
-        
-        # First linear layer with mask
-        self.linear1 = nn.Linear(hidden_dim, ff_dim)
-        
-        # Create and register the prime resonance mask
-        mask = create_prime_resonance_mask(hidden_dim, primes)
-        self.register_buffer('mask', mask)
-        
-        # Second linear layer
-        self.linear2 = nn.Linear(ff_dim, hidden_dim)
-        
-        self.dropout = nn.Dropout(dropout)
-        
-        # Initialize the masked weights
-        self._apply_mask()
-    
-    def _apply_mask(self):
-        """Apply the prime resonance mask to the weights of the first linear layer."""
-        # Get the weight matrix
-        weight = self.linear1.weight  # [ff_dim, hidden_dim]
-        
-        # Create mask of correct size
-        mask = create_prime_resonance_mask(min(self.ff_dim, self.hidden_dim), self.primes)
-        
-        # Expand mask if needed
-        if self.ff_dim > mask.size(0) or self.hidden_dim > mask.size(1):
-            expanded_mask = torch.zeros((self.ff_dim, self.hidden_dim), dtype=torch.bool, device=weight.device)
-            # Copy the mask to the expanded tensor
-            h_dim = min(mask.size(0), self.ff_dim)
-            w_dim = min(mask.size(1), self.hidden_dim)
-            expanded_mask[:h_dim, :w_dim] = mask[:h_dim, :w_dim]
-            mask_tensor = expanded_mask
-        else:
-            # Use a slice of the mask
-            mask_tensor = mask[:self.ff_dim, :self.hidden_dim]
-        
-        # Register the properly sized mask
-        self.register_buffer('applied_mask', mask_tensor)
-        
-        # Apply the mask
-        masked_weight = weight * mask_tensor.float()
-        
-        # Update the weight
-        self.linear1.weight.data = masked_weight
-    
-    def forward(self, x):
-        """
-        Forward pass through the masked feed-forward layer.
-        
-        Args:
-            x (torch.Tensor): Input tensor of shape [batch_size, seq_len, hidden_dim]
-        
-        Returns:
-            torch.Tensor: Output tensor of shape [batch_size, seq_len, hidden_dim]
-        """
-        # Re-apply mask to ensure it's maintained during training
-        if self.training:
-            weight = self.linear1.weight
-            weight.data = weight.data * self.applied_mask.float()
-        
-        # Forward pass through the feed-forward network
-        x = self.linear1(x)
-        x = F.gelu(x)
-        x = self.dropout(x)
-        x = self.linear2(x)
-        
-        return x
+from src.model.resonance_attention import ResonanceAttention
+from src.model.pre_manifest_layer import PreManifestLayer
 
 
 class ResonanceBlock(nn.Module):
     """
-    Complete Resonance Block combining attention, feed-forward layers, and residual connections.
+    Transformer block enhanced with quantum resonance principles.
     
-    Each block can be viewed as a resonance iteration unit that refines the representation
-    through entropy-guided attention and structured feed-forward transformations.
+    This block extends the standard transformer block by incorporating
+    resonance-based attention and pre-manifest transformation, allowing for
+    more complex interactions between tokens and improved contextualization.
     """
     
-    def __init__(self, hidden_dim, num_heads, ff_dim, primes=[7, 11, 13, 17, 19], 
-                 max_iterations=10, epsilon=0.1, dropout=0.1, layer_norm_eps=1e-12):
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_heads: int,
+        dropout: float = 0.1,
+        prime: int = 7,
+        base_dim: int = 32,
+        max_iterations: int = 10,
+        entropy_threshold: float = 0.2,
+        use_pre_manifest: bool = True,
+        layer_idx: int = 0
+    ):
         """
-        Initialize the Resonance Block.
+        Initialize resonance block.
         
         Args:
-            hidden_dim (int): Size of the hidden dimension
-            num_heads (int): Number of attention heads
-            ff_dim (int): Size of the feed-forward inner dimension
-            primes (List[int]): Primes used for resonance mask
-            max_iterations (int): Maximum number of refinement iterations
-            epsilon (float): Entropy threshold for halting
-            dropout (float): Dropout probability
-            layer_norm_eps (float): Layer normalization epsilon
+            hidden_dim: Dimension of hidden states
+            num_heads: Number of attention heads
+            dropout: Dropout rate
+            prime: Prime number for resonance patterns
+            base_dim: Base dimension for prime encoding
+            max_iterations: Maximum number of iterations for resonance
+            entropy_threshold: Entropy threshold for early stopping
+            use_pre_manifest: Whether to use pre-manifest transformation
+            layer_idx: Index of the layer (used for scaling)
         """
         super().__init__()
         
-        # Resonance Attention
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.layer_idx = layer_idx
+        self.use_pre_manifest = use_pre_manifest
+        
+        # Resonance attention
         self.attention = ResonanceAttention(
             hidden_dim=hidden_dim,
             num_heads=num_heads,
+            dropout=dropout,
+            prime=prime,
             max_iterations=max_iterations,
-            epsilon=epsilon,
-            dropout=dropout
+            entropy_threshold=entropy_threshold,
+            layer_idx=layer_idx
         )
         
-        # Feed-forward with prime resonance mask
-        self.feed_forward = MaskedFeedForward(
-            hidden_dim=hidden_dim,
-            ff_dim=ff_dim,
-            primes=primes,
-            dropout=dropout
+        # Feed-forward network
+        self.feed_forward = nn.Sequential(
+            nn.Linear(hidden_dim, 4 * hidden_dim),
+            nn.GELU(),
+            nn.Linear(4 * hidden_dim, hidden_dim),
+            nn.Dropout(dropout)
         )
         
-        # Layer normalizations
-        self.layer_norm1 = nn.LayerNorm(hidden_dim, eps=layer_norm_eps)
-        self.layer_norm2 = nn.LayerNorm(hidden_dim, eps=layer_norm_eps)
+        # Layer normalization
+        self.norm1 = nn.LayerNorm(hidden_dim)
+        self.norm2 = nn.LayerNorm(hidden_dim)
+        
+        # Pre-manifest layer (optional)
+        if use_pre_manifest:
+            self.pre_manifest = PreManifestLayer(
+                hidden_dim=hidden_dim,
+                prime=prime,
+                base_dim=base_dim
+            )
+        else:
+            self.pre_manifest = None
         
         # Dropout
         self.dropout = nn.Dropout(dropout)
     
-    def forward(self, x, attention_mask=None, return_attention=False):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        output_attentions: bool = False,
+        return_metadata: bool = False
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...], Dict[str, Any]]:
         """
-        Forward pass through the resonance block.
+        Forward pass of resonance block.
         
         Args:
-            x (torch.Tensor): Input tensor of shape [batch_size, seq_len, hidden_dim]
-            attention_mask (torch.Tensor, optional): Attention mask of shape 
-                [batch_size, 1, 1, seq_len]
-            return_attention (bool): Whether to return attention metadata
-        
+            hidden_states: Input hidden states [batch_size, seq_len, hidden_dim]
+            attention_mask: Attention mask [batch_size, seq_len]
+            output_attentions: Whether to return attention weights
+            return_metadata: Whether to return metadata
+            
         Returns:
-            torch.Tensor: Output tensor of shape [batch_size, seq_len, hidden_dim]
-            dict: Metadata including entropy, iterations used, and optionally attention weights
+            Updated hidden states with optional attention weights and metadata
         """
-        # Residual connection for attention
-        residual = x
+        # Apply pre-manifest transformation if enabled
+        if self.use_pre_manifest and self.pre_manifest is not None:
+            hidden_states = self.pre_manifest(hidden_states)
         
-        # Layer normalization before attention
-        x_norm = self.layer_norm1(x)
+        # Save residual connection
+        residual = hidden_states
+        
+        # Apply layer normalization before attention
+        hidden_states = self.norm1(hidden_states)
         
         # Apply resonance attention
-        attn_output, attn_metadata = self.attention(
-            x_norm, 
+        attention_outputs = self.attention(
+            hidden_states,
             attention_mask=attention_mask,
-            return_attn_weights=return_attention
+            output_attentions=output_attentions,
+            return_metadata=return_metadata
         )
         
-        # Apply dropout and residual connection
-        x = residual + self.dropout(attn_output)
+        # Process attention outputs
+        if output_attentions and return_metadata:
+            attention_output, attention_weights, metadata = attention_outputs
+        elif output_attentions:
+            attention_output, attention_weights = attention_outputs
+        elif return_metadata:
+            attention_output, metadata = attention_outputs
+        else:
+            attention_output = attention_outputs
         
-        # Residual connection for feed-forward
-        residual = x
+        # Apply residual connection
+        hidden_states = residual + self.dropout(attention_output)
         
-        # Layer normalization before feed-forward
-        x_norm = self.layer_norm2(x)
+        # Save residual connection
+        residual = hidden_states
         
-        # Apply masked feed-forward
-        ff_output = self.feed_forward(x_norm)
+        # Apply layer normalization before feed-forward
+        hidden_states = self.norm2(hidden_states)
         
-        # Apply dropout and residual connection
-        x = residual + self.dropout(ff_output)
+        # Apply feed-forward network
+        hidden_states = self.feed_forward(hidden_states)
         
-        return x, attn_metadata
+        # Apply residual connection
+        hidden_states = residual + self.dropout(hidden_states)
+        
+        # Prepare return values
+        if output_attentions and return_metadata:
+            metadata["layer_idx"] = self.layer_idx
+            return hidden_states, attention_weights, metadata
+        elif output_attentions:
+            return hidden_states, attention_weights
+        elif return_metadata:
+            metadata["layer_idx"] = self.layer_idx
+            return hidden_states, metadata
+        else:
+            return hidden_states
+    
+    def get_config(self) -> Dict[str, Any]:
+        """
+        Get block configuration.
+        
+        Returns:
+            Configuration dictionary
+        """
+        config = {
+            "hidden_dim": self.hidden_dim,
+            "num_heads": self.num_heads,
+            "layer_idx": self.layer_idx,
+            "use_pre_manifest": self.use_pre_manifest
+        }
+        
+        # Add attention config
+        if hasattr(self.attention, "get_config"):
+            config["attention"] = self.attention.get_config()
+        
+        # Add pre-manifest config
+        if self.pre_manifest is not None and hasattr(self.pre_manifest, "get_config"):
+            config["pre_manifest"] = self.pre_manifest.get_config()
+        
+        return config

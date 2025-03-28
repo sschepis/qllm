@@ -23,7 +23,7 @@ from src.model.extensions.extension_config import ExtensionConfig
 from src.data.dialogue_dataset import get_dialogue_dataloaders
 from src.data.function_calling_dataset import get_function_calling_dataloaders, get_default_function_definitions
 from src.training.trainer import Trainer
-from src.training.continuous_learning import ContinuousLearningManager, ContinuousLearningConfig
+from src.training.trainers.continuous_learning import ContinuousLearningManager, ContinuousLearningConfig
 from src.training.checkpoint import find_latest_checkpoint
 from src.utils.device import get_device
 from src.utils.logging import setup_logger

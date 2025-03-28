@@ -1,6 +1,8 @@
 """
-Device handling utilities for the Quantum Resonance Language Model.
-Provides consistent device setup and management across training and inference.
+Device handling utilities for QLLM.
+
+This module provides consistent device setup and management across training and inference,
+including detection and configuration of various hardware accelerators.
 """
 
 import os
@@ -9,7 +11,7 @@ import logging
 from typing import Optional, Union, Tuple
 
 # Get logger
-logger = logging.getLogger("quantum_resonance")
+logger = logging.getLogger("qllm.utils.device")
 
 
 def get_default_device() -> torch.device:
@@ -45,11 +47,11 @@ def parse_device_str(device_str: Optional[str] = None) -> torch.device:
         try:
             index = int(device_str.split(":")[1])
             if index >= torch.cuda.device_count():
-                print(f"Warning: Specified GPU index {index} is out of range. "
+                logger.warning(f"Specified GPU index {index} is out of range. "
                       f"Using default device instead.")
                 return get_default_device()
         except (ValueError, IndexError):
-            print(f"Warning: Invalid CUDA device format '{device_str}'. "
+            logger.warning(f"Invalid CUDA device format '{device_str}'. "
                   f"Using default device instead.")
             return get_default_device()
     
@@ -137,13 +139,13 @@ def print_device_info(device: Optional[torch.device] = None) -> None:
     
     info = get_device_info(device)
     
-    print(f"Using device: {device}")
+    logger.info(f"Using device: {device}")
     
     if device.type == "cuda":
-        print(f"  Device name: {info['name']}")
-        print(f"  Memory: {info['total_memory_gb']:.2f} GB")
+        logger.info(f"  Device name: {info['name']}")
+        logger.info(f"  Memory: {info['total_memory_gb']:.2f} GB")
         if torch.cuda.device_count() > 1:
-            print(f"  Multi-GPU: {torch.cuda.device_count()} devices available")
+            logger.info(f"  Multi-GPU: {torch.cuda.device_count()} devices available")
 
 
 def move_to_device(
@@ -176,6 +178,42 @@ def move_to_device(
         return tuple(move_to_device(x, device, non_blocking) for x in data)
     else:
         return data
+
+
+def get_memory_usage(device: Optional[torch.device] = None) -> Dict[str, float]:
+    """
+    Get the current memory usage for a device.
+    
+    Args:
+        device: The device to check memory for (uses default if None)
+        
+    Returns:
+        Dict containing memory usage statistics in GB
+    """
+    if device is None:
+        device = get_default_device()
+    
+    result = {}
+    
+    if device.type == "cuda":
+        # Get current memory usage
+        current = torch.cuda.memory_allocated(device) / (1024**3)
+        peak = torch.cuda.max_memory_allocated(device) / (1024**3)
+        reserved = torch.cuda.memory_reserved(device) / (1024**3)
+        
+        # Get device properties for total memory
+        props = torch.cuda.get_device_properties(device)
+        total = props.total_memory / (1024**3)
+        
+        result = {
+            "current_gb": current,
+            "peak_gb": peak,
+            "reserved_gb": reserved,
+            "total_gb": total,
+            "utilization_pct": (current / total) * 100
+        }
+    
+    return result
 
 
 def set_cuda_device_environment() -> None:

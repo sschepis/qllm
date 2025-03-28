@@ -1,394 +1,231 @@
 """
-Configuration schema for the Quantum Resonance Language Model.
+Configuration schema for QLLM.
 
-This module defines the schema for validating configuration files,
-including required fields, types, and validation rules.
+This module provides schema validation for configuration files,
+ensuring that configurations have the correct structure and values.
+It has been simplified to leverage the validation methods in the
+config classes themselves.
 """
 
-from typing import List, Dict, Any, Optional
-import re
+import logging
+from typing import Dict, Any, List, Optional, Set, Union
+
+# Setup logger
+logger = logging.getLogger("qllm.config")
 
 
 class ConfigSchema:
-    """Configuration schema with validation."""
+    """
+    Configuration schema validator for QLLM.
+    
+    This class provides validation for configuration dictionaries,
+    ensuring they have the correct structure and values.
+    """
     
     def __init__(self):
-        """Initialize the schema."""
-        self.schema = {
+        """Initialize the schema validator."""
+        # Required top-level sections
+        self.required_sections = ["model", "training", "data"]
+        
+        # Required fields for each section
+        self.required_fields = {
+            "model": [],  # No required fields, all have defaults
+            "training": [],  # No required fields, all have defaults
+            "data": []  # No required fields, all have defaults
+        }
+        
+        # Expected types for common fields
+        self.field_types = {
             "model": {
-                "vocab_size": {
-                    "type": "int",
-                    "range": [1000, 1000000],
-                    "default": 50257,
-                    "help": "Size of the vocabulary"
-                },
-                "hidden_dim": {
-                    "type": "int",
-                    "range": [64, 4096],
-                    "default": 768,
-                    "help": "Hidden dimension size"
-                },
-                "num_layers": {
-                    "type": "int",
-                    "range": [1, 48],
-                    "default": 12,
-                    "help": "Number of transformer layers"
-                },
-                "num_heads": {
-                    "type": "int",
-                    "range": [1, 48],
-                    "default": 12,
-                    "help": "Number of attention heads"
-                },
-                "dropout": {
-                    "type": "float",
-                    "range": [0.0, 0.9],
-                    "default": 0.1,
-                    "help": "Dropout probability"
-                },
-                "max_seq_length": {
-                    "type": "int",
-                    "range": [16, 8192],
-                    "default": 1024,
-                    "help": "Maximum sequence length"
-                },
-                "primes": {
-                    "type": "list",
-                    "default": [23, 29, 31, 37, 41, 43, 47],
-                    "help": "Prime numbers for quantum resonance"
-                },
-                "max_iterations": {
-                    "type": "int",
-                    "range": [1, 100],
-                    "default": 10,
-                    "help": "Maximum iterations for resonance convergence"
-                },
-                "entropy_threshold": {
-                    "type": "float",
-                    "range": [0.0, 1.0],
-                    "default": 0.01,
-                    "help": "Entropy threshold for convergence"
-                },
-                "phase_factor": {
-                    "type": "float",
-                    "range": [0.0, 1.0],
-                    "default": 0.5,
-                    "help": "Phase factor for quantum adjustment"
-                },
-                "extensions": {
-                    "type": "dict",
-                    "default": {},
-                    "help": "Model extensions configuration"
-                },
-                "extra_model_params": {
-                    "type": "dict",
-                    "default": {},
-                    "help": "Additional model parameters"
-                }
+                "vocab_size": int,
+                "hidden_dim": int,
+                "num_layers": int,
+                "num_heads": int,
+                "dropout": float,
+                "max_seq_length": int,
+                "use_cache": bool,
+                "tie_word_embeddings": bool,
+                "primes": list,
+                "base_dim": int,
+                "max_iterations": int,
+                "entropy_threshold": float,
+                "use_prime_mask": bool,
+                "enable_hcw": bool,
+                "memory_size": int,
+                "memory_key_dim": int,
+                "extensions": dict
             },
             "training": {
-                "batch_size": {
-                    "type": "int",
-                    "range": [1, 1024],
-                    "default": 16,
-                    "help": "Training batch size"
-                },
-                "eval_batch_size": {
-                    "type": "int",
-                    "range": [1, 1024],
-                    "default": 16,
-                    "help": "Evaluation batch size"
-                },
-                "learning_rate": {
-                    "type": "float",
-                    "range": [1e-6, 1.0],
-                    "default": 5e-5,
-                    "help": "Learning rate"
-                },
-                "weight_decay": {
-                    "type": "float",
-                    "range": [0.0, 1.0],
-                    "default": 0.01,
-                    "help": "Weight decay"
-                },
-                "max_epochs": {
-                    "type": "int",
-                    "range": [1, 1000],
-                    "default": 3,
-                    "help": "Maximum number of epochs"
-                },
-                "training_type": {
-                    "type": "str",
-                    "choices": ["standard", "dialogue", "verbose"],
-                    "default": "standard",
-                    "help": "Type of training"
-                },
-                "learning_mode": {
-                    "type": "str",
-                    "choices": ["adaptive", "scheduled", "feedback_driven"],
-                    "default": "adaptive",
-                    "help": "Learning rate mode"
-                },
-                "device": {
-                    "type": "str",
-                    "optional": True,
-                    "help": "Device to use (cuda, cpu, mps, auto)"
-                },
-                "use_mixed_precision": {
-                    "type": "bool",
-                    "default": True,
-                    "help": "Whether to use mixed precision training"
-                },
-                "optimizer": {
-                    "type": "str",
-                    "choices": ["adamw", "adam", "sgd"],
-                    "default": "adamw",
-                    "help": "Optimizer to use"
-                },
-                "max_grad_norm": {
-                    "type": "float",
-                    "range": [0.1, 100.0],
-                    "default": 1.0,
-                    "help": "Maximum gradient norm for clipping"
-                },
-                "accumulation_steps": {
-                    "type": "int",
-                    "range": [1, 32],
-                    "default": 1,
-                    "help": "Gradient accumulation steps"
-                },
-                "lr_scheduler": {
-                    "type": "str",
-                    "choices": ["linear", "cosine", "step", "constant"],
-                    "default": "cosine",
-                    "help": "Learning rate scheduler"
-                },
-                "warmup_steps": {
-                    "type": "int",
-                    "range": [0, 10000],
-                    "default": 0,
-                    "help": "Number of warmup steps"
-                },
-                "logging_steps": {
-                    "type": "int",
-                    "range": [1, 1000],
-                    "default": 10,
-                    "help": "Logging frequency (steps)"
-                },
-                "save_steps": {
-                    "type": "int",
-                    "range": [0, 10000],
-                    "default": 0,
-                    "help": "Checkpoint frequency (steps). 0 for epoch-only saving."
-                },
-                "eval_steps": {
-                    "type": "int",
-                    "range": [0, 10000],
-                    "default": 0,
-                    "help": "Evaluation frequency (steps). 0 for epoch-only evaluation."
-                },
-                "save_every_epoch": {
-                    "type": "bool",
-                    "default": True,
-                    "help": "Whether to save after each epoch"
-                },
-                "disable_optimizer_saving": {
-                    "type": "bool",
-                    "default": False,
-                    "help": "Whether to disable saving optimizer state"
-                },
-                "output_dir": {
-                    "type": "str",
-                    "default": "runs/quantum_resonance",
-                    "help": "Output directory"
-                },
-                "seed": {
-                    "type": "int",
-                    "range": [0, 9999],
-                    "default": 42,
-                    "help": "Random seed"
-                },
-                "extra_training_params": {
-                    "type": "dict",
-                    "default": {},
-                    "help": "Additional training parameters"
-                }
+                "batch_size": int,
+                "learning_rate": float,
+                "weight_decay": float,
+                "max_epochs": int,
+                "warmup_steps": int,
+                "accumulation_steps": int,
+                "save_steps": int,
+                "eval_steps": int,
+                "checkpoint_dir": str,
+                "device": str,
+                "seed": int,
+                "use_mixed_precision": bool,
+                "training_strategy": str,
+                "model_type": str,
+                "enabled_extensions": list,
+                "extension_config": dict
             },
             "data": {
-                "dataset_name": {
-                    "type": "str",
-                    "default": "wikitext",
-                    "help": "Dataset name"
-                },
-                "tokenizer_name": {
-                    "type": "str",
-                    "default": "gpt2",
-                    "help": "Tokenizer name or path"
-                },
-                "train_file": {
-                    "type": "str",
-                    "optional": True,
-                    "help": "Path to training data file"
-                },
-                "validation_file": {
-                    "type": "str",
-                    "optional": True,
-                    "help": "Path to validation data file"
-                },
-                "test_file": {
-                    "type": "str",
-                    "optional": True,
-                    "help": "Path to test data file"
-                },
-                "data_path": {
-                    "type": "str",
-                    "optional": True,
-                    "help": "Path to data directory"
-                },
-                "max_length": {
-                    "type": "int",
-                    "range": [16, 8192],
-                    "default": 512,
-                    "help": "Maximum sequence length"
-                },
-                "stride": {
-                    "type": "int",
-                    "range": [16, 2048],
-                    "default": 256,
-                    "help": "Stride for overlapping chunks"
-                },
-                "preprocessing_num_workers": {
-                    "type": "int",
-                    "range": [1, 64],
-                    "default": 4,
-                    "help": "Number of preprocessing workers"
-                },
-                "cache_dir": {
-                    "type": "str",
-                    "default": ".cache",
-                    "help": "Cache directory"
-                },
-                "return_tensors": {
-                    "type": "str",
-                    "choices": ["pt", "tf", "np"],
-                    "default": "pt",
-                    "help": "Return tensor type"
-                },
-                "subset_size": {
-                    "type": "int",
-                    "optional": True,
-                    "help": "Subset size for debugging"
-                },
-                "system_prompt": {
-                    "type": "str",
-                    "optional": True,
-                    "help": "System prompt for dialogue datasets"
-                },
-                "function_defs_path": {
-                    "type": "str",
-                    "optional": True,
-                    "help": "Path to function definitions file"
-                },
-                "extra_data_params": {
-                    "type": "dict",
-                    "default": {},
-                    "help": "Additional data parameters"
-                }
+                "dataset_name": str,
+                "tokenizer_name": str,
+                "train_file": str,
+                "validation_file": str,
+                "test_file": str,
+                "max_length": int,
+                "preprocessing_num_workers": int,
+                "dataloader_num_workers": int,
+                "dataloader_pin_memory": bool,
+                "dataset_config": dict,
+                "tokenizer_config": dict
             }
         }
+        
+        # Value constraints for certain fields
+        self.constraints = {
+            "model.dropout": (0.0, 1.0),  # Range (min, max)
+            "training.learning_rate": (0.0, None),  # Range (min, no max)
+            "training.weight_decay": (0.0, None),  # Range (min, no max)
+            "training.save_strategy": {"steps", "epochs", "no"},  # Enum (set of allowed values)
+            "training.eval_strategy": {"steps", "epochs", "no"},  # Enum (set of allowed values)
+            "data.padding": {"max_length", "do_not_pad", "longest"}  # Enum
+        }
     
-    def validate(self, config: Dict[str, Dict[str, Any]]) -> List[str]:
+    def validate(self, config: Dict[str, Any]) -> List[str]:
         """
-        Validate a configuration.
+        Validate a configuration dictionary.
         
         Args:
-            config: Configuration to validate
+            config: Configuration dictionary to validate
             
         Returns:
-            List of error messages, empty if validation passes
+            List of validation error messages, empty if valid
         """
         errors = []
         
-        # Validate each section
-        for section, section_schema in self.schema.items():
-            # Check if section exists
+        # Check that all required sections are present
+        for section in self.required_sections:
             if section not in config:
-                errors.append(f"Missing section: {section}")
+                errors.append(f"Missing required section: {section}")
                 continue
             
-            # Get section configuration
-            section_config = config[section]
+            if not isinstance(config[section], dict):
+                errors.append(f"Section {section} must be a dictionary")
+                continue
             
-            # Validate each field
-            for field, field_schema in section_schema.items():
-                # Check if field exists
-                if field not in section_config:
-                    # If the field is optional, it's allowed to be missing
-                    if field_schema.get("optional", False):
-                        continue
-                    
-                    # If the field has a default value, add it to the configuration
-                    if "default" in field_schema:
-                        section_config[field] = field_schema["default"]
-                        continue
-                    
-                    # Required field is missing
-                    errors.append(f"Missing field: {section}.{field}")
+            # Check that all required fields are present
+            for field in self.required_fields[section]:
+                if field not in config[section]:
+                    errors.append(f"Missing required field: {section}.{field}")
+        
+        # Check field types
+        for section_name, section_data in config.items():
+            if section_name not in self.field_types:
+                continue
+                
+            if not isinstance(section_data, dict):
+                continue
+                
+            section_types = self.field_types[section_name]
+            for field_name, field_value in section_data.items():
+                # Skip None values (they're valid for any type)
+                if field_value is None:
                     continue
-                
-                # Get field value
-                value = section_config[field]
-                
-                # Skip validation for None values in optional fields
-                if value is None and field_schema.get("optional", False):
+                    
+                # Skip fields without type information
+                if field_name not in section_types:
                     continue
+                    
+                expected_type = section_types[field_name]
                 
-                # Validate field value
-                field_type = field_schema.get("type", "str")
+                # Check field type
+                if not isinstance(field_value, expected_type):
+                    errors.append(
+                        f"Field {section_name}.{field_name} has incorrect type: "
+                        f"expected {expected_type.__name__}, got {type(field_value).__name__}"
+                    )
+        
+        # Check value constraints
+        for constraint_key, constraint_value in self.constraints.items():
+            section_name, field_name = constraint_key.split(".")
+            
+            # Skip if section or field doesn't exist
+            if section_name not in config or not isinstance(config[section_name], dict):
+                continue
                 
-                if field_type == "int":
-                    if not isinstance(value, int):
-                        errors.append(f"Expected int for {section}.{field}, got {type(value).__name__}")
-                    elif "range" in field_schema:
-                        min_val, max_val = field_schema["range"]
-                        if value < min_val or value > max_val:
-                            errors.append(f"Value for {section}.{field} must be between {min_val} and {max_val}")
+            if field_name not in config[section_name] or config[section_name][field_name] is None:
+                continue
+            
+            field_value = config[section_name][field_name]
+            
+            # Check range constraint
+            if isinstance(constraint_value, tuple):
+                min_val, max_val = constraint_value
                 
-                elif field_type == "float":
-                    if not isinstance(value, (int, float)):
-                        errors.append(f"Expected float for {section}.{field}, got {type(value).__name__}")
-                    elif "range" in field_schema:
-                        min_val, max_val = field_schema["range"]
-                        if value < min_val or value > max_val:
-                            errors.append(f"Value for {section}.{field} must be between {min_val} and {max_val}")
+                if min_val is not None and field_value < min_val:
+                    errors.append(
+                        f"Field {constraint_key} value {field_value} is less than minimum {min_val}"
+                    )
                 
-                elif field_type == "bool":
-                    if not isinstance(value, bool):
-                        errors.append(f"Expected bool for {section}.{field}, got {type(value).__name__}")
-                
-                elif field_type == "str":
-                    if not isinstance(value, str):
-                        errors.append(f"Expected str for {section}.{field}, got {type(value).__name__}")
-                    elif "choices" in field_schema and value not in field_schema["choices"]:
-                        choices_str = ", ".join(field_schema["choices"])
-                        errors.append(f"Value for {section}.{field} must be one of: {choices_str}")
-                
-                elif field_type == "list":
-                    if not isinstance(value, list):
-                        errors.append(f"Expected list for {section}.{field}, got {type(value).__name__}")
-                
-                elif field_type == "dict":
-                    if not isinstance(value, dict):
-                        errors.append(f"Expected dict for {section}.{field}, got {type(value).__name__}")
+                if max_val is not None and field_value > max_val:
+                    errors.append(
+                        f"Field {constraint_key} value {field_value} is greater than maximum {max_val}"
+                    )
+            
+            # Check enum constraint
+            elif isinstance(constraint_value, set):
+                if field_value not in constraint_value:
+                    errors.append(
+                        f"Field {constraint_key} value '{field_value}' not in allowed values: {constraint_value}"
+                    )
         
         return errors
 
 
 def get_schema() -> ConfigSchema:
     """
-    Get the configuration schema.
+    Get a schema validator instance.
     
     Returns:
-        Configuration schema
+        ConfigSchema instance
     """
     return ConfigSchema()
+
+
+class ConfigValidationError(Exception):
+    """Exception raised for configuration validation errors."""
+    
+    def __init__(self, errors: List[str]):
+        """
+        Initialize the exception.
+        
+        Args:
+            errors: List of validation error messages
+        """
+        self.errors = errors
+        message = f"Configuration validation failed with {len(errors)} errors:\n"
+        message += "\n".join(f"- {error}" for error in errors)
+        super().__init__(message)
+
+
+def validate_config(config: Dict[str, Any]) -> None:
+    """
+    Validate a configuration dictionary and raise an exception if invalid.
+    
+    Args:
+        config: Configuration dictionary to validate
+        
+    Raises:
+        ConfigValidationError: If the configuration is invalid
+    """
+    schema = get_schema()
+    errors = schema.validate(config)
+    if errors:
+        raise ConfigValidationError(errors)

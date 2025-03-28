@@ -1,272 +1,352 @@
-#!/usr/bin/env python3
 """
-Main training script for Semantic Resonance Language Model.
+Main training script for QLLM.
 
-This script handles the complete training pipeline, including data loading,
-model initialization, training, evaluation, and model saving.
+This module provides a simplified interface for training models,
+leveraging the unified training components to streamline the process.
 """
 
 import os
+import sys
 import argparse
-import json
+import logging
+from typing import Dict, Any, Optional, List, Union
+
 import torch
-from transformers import AutoTokenizer
+import numpy as np
 
-from src.config import ModelConfig, TrainingConfig, DataConfig, get_default_configs
-from src.model.semantic_resonance_model import SemanticResonanceModel
-from src.data.wikitext_dataset import get_wikitext_dataloaders
-from src.training.trainer import Trainer
-from src.evaluation.metrics import evaluate_model
-from src.utils.compression import compress_model, compare_models
-
-
-def parse_args():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Train a Semantic Resonance Language Model")
-    
-    # Model configuration
-    parser.add_argument("--vocab_size", type=int, default=30000, help="Vocabulary size")
-    parser.add_argument("--hidden_dim", type=int, default=768, help="Hidden dimension size")
-    parser.add_argument("--num_layers", type=int, default=6, help="Number of layers")
-    parser.add_argument("--num_heads", type=int, default=12, help="Number of attention heads")
-    parser.add_argument("--max_seq_length", type=int, default=512, help="Maximum sequence length")
-    parser.add_argument("--dropout", type=float, default=0.1, help="Dropout probability")
-    
-    # Prime Hilbert Encoder settings
-    parser.add_argument("--primes", type=int, nargs="+", default=[7, 11, 13, 17, 19], 
-                       help="Prime numbers for subspace decomposition")
-    parser.add_argument("--base_dim", type=int, default=768, 
-                       help="Base embedding dimension")
-    
-    # Resonance Block settings
-    parser.add_argument("--max_iterations", type=int, default=10, 
-                       help="Maximum iterations for resonance attention")
-    parser.add_argument("--entropy_threshold", type=float, default=0.1, 
-                       help="Entropy threshold for halting")
-    parser.add_argument("--use_prime_mask", action="store_true", 
-                       help="Use prime resonance mask for feed-forward layers")
-    
-    # HCW settings
-    parser.add_argument("--enable_hcw", action="store_true", 
-                       help="Enable Homomorphic Computational Wrapper")
-    parser.add_argument("--memory_size", type=int, default=1000, 
-                       help="Memory size for HCW")
-    parser.add_argument("--memory_key_dim", type=int, default=128, 
-                       help="Memory key dimension for HCW")
-    
-    # Training configuration
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
-    parser.add_argument("--learning_rate", type=float, default=5e-5, help="Learning rate")
-    parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay")
-    parser.add_argument("--max_epochs", type=int, default=10, help="Maximum epochs")
-    parser.add_argument("--warmup_steps", type=int, default=1000, help="Warmup steps")
-    parser.add_argument("--accumulation_steps", type=int, default=1, help="Gradient accumulation steps")
-    
-    # Data configuration
-    parser.add_argument("--tokenizer_name", type=str, default="gpt2", help="Tokenizer name")
-    parser.add_argument("--dataset_name", type=str, default="wikitext-103-raw-v1", help="Dataset name")
-    parser.add_argument("--cache_dir", type=str, default=".cache", help="Cache directory")
-    
-    # Output configuration
-    parser.add_argument("--output_dir", type=str, default="runs/semantic_resonance", 
-                       help="Output directory")
-    parser.add_argument("--save_steps", type=int, default=1000, help="Save steps")
-    parser.add_argument("--eval_steps", type=int, default=500, help="Evaluation steps")
-    
-    # Compression
-    parser.add_argument("--compress_model", action="store_true", 
-                       help="Apply compression after training")
-    parser.add_argument("--compression_threshold", type=float, default=0.8, 
-                       help="Threshold for compression")
-    
-    # Hardware configuration
-    parser.add_argument("--device", type=str, default=None, 
-                       help="Device to train on (default: cuda if available)")
-    parser.add_argument("--num_workers", type=int, default=4, 
-                       help="Number of workers for data loading")
-    
-    # Resuming training
-    parser.add_argument("--resume_from", type=str, default=None, 
-                       help="Path to checkpoint to resume training from")
-    
-    return parser.parse_args()
+from src.config import load_config, parse_args, validate_config
+from src.training import TrainerFactory
+from src.data import (
+    create_text_dataloader,
+    create_dialogue_dataloader,
+    create_function_calling_dataloader,
+    create_dataloader_from_config
+)
+from src.config.model_config import ModelConfig
+from src.config.training_config import TrainingConfig
+from src.config.data_config import DataConfig
 
 
-def create_config_from_args(args):
-    """Create configuration objects from command line arguments."""
-    # Create model config
-    model_config = ModelConfig(
-        vocab_size=args.vocab_size,
-        hidden_dim=args.hidden_dim,
-        num_layers=args.num_layers,
-        num_heads=args.num_heads,
-        max_seq_length=args.max_seq_length,
-        dropout=args.dropout,
-        primes=args.primes,
-        base_dim=args.base_dim,
-        max_iterations=args.max_iterations,
-        entropy_threshold=args.entropy_threshold,
-        use_prime_mask=args.use_prime_mask,
-        enable_hcw=args.enable_hcw,
-        memory_size=args.memory_size,
-        memory_key_dim=args.memory_key_dim
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("qllm_train.log")
+    ]
+)
+logger = logging.getLogger("qllm.train")
+
+
+def setup_seed(seed: int) -> None:
+    """
+    Set random seeds for reproducibility.
+    
+    Args:
+        seed: Random seed
+    """
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def get_device(device_config: Optional[str] = None) -> torch.device:
+    """
+    Get the appropriate device for training.
+    
+    Args:
+        device_config: Device configuration string
+        
+    Returns:
+        PyTorch device
+    """
+    # Use specified device if provided
+    if device_config is not None and device_config != "auto":
+        return torch.device(device_config)
+    
+    # Auto-detect device
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    elif hasattr(torch, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    else:
+        return torch.device("cpu")
+
+
+def load_or_create_model(
+    model_config: ModelConfig,
+    device: torch.device
+) -> torch.nn.Module:
+    """
+    Load or create a model based on configuration.
+    
+    Args:
+        model_config: Model configuration
+        device: Device to place model on
+        
+    Returns:
+        Initialized model
+    """
+    logger.info(f"Initializing {model_config.model_type} model ({model_config.model_size})")
+    
+    # Check if loading from checkpoint
+    if model_config.checkpoint_path:
+        logger.info(f"Loading model from checkpoint: {model_config.checkpoint_path}")
+        try:
+            model = torch.load(model_config.checkpoint_path, map_location=device)
+            return model
+        except Exception as e:
+            logger.error(f"Error loading model from checkpoint: {e}")
+            logger.info("Falling back to creating new model")
+    
+    # Create new model based on model type
+    try:
+        if model_config.model_type == "semantic_resonance":
+            # Import appropriate model class
+            from src.model.semantic_resonance_model import SemanticResonanceModel
+            
+            # Create model
+            model = SemanticResonanceModel(
+                model_size=model_config.model_size,
+                vocab_size=model_config.vocab_size,
+                max_seq_length=model_config.max_seq_length,
+                **model_config.get_additional_params()
+            )
+            
+        elif model_config.model_type == "semantic_resonance_with_extensions":
+            # Import appropriate model class
+            from src.model.semantic_resonance_model_with_extensions import SemanticResonanceModelWithExtensions
+            
+            # Create model
+            model = SemanticResonanceModelWithExtensions(
+                model_size=model_config.model_size,
+                vocab_size=model_config.vocab_size,
+                max_seq_length=model_config.max_seq_length,
+                **model_config.get_additional_params()
+            )
+            
+        else:
+            raise ValueError(f"Unknown model type: {model_config.model_type}")
+        
+        # Move model to device
+        model = model.to(device)
+        
+        return model
+        
+    except Exception as e:
+        logger.error(f"Error creating model: {e}")
+        raise
+
+
+def prepare_dataloaders(
+    data_config: DataConfig,
+    training_config: TrainingConfig,
+    tokenizer: Any
+) -> Tuple[torch.utils.data.DataLoader, Optional[torch.utils.data.DataLoader]]:
+    """
+    Prepare training and evaluation dataloaders.
+    
+    Args:
+        data_config: Data configuration
+        training_config: Training configuration
+        tokenizer: Tokenizer for processing text
+        
+    Returns:
+        Tuple of (train_dataloader, eval_dataloader)
+    """
+    logger.info("Preparing dataloaders")
+    
+    # Determine dataloader type based on data configuration
+    try:
+        if data_config.dataset_type == "text":
+            train_dataloader = create_text_dataloader(
+                data_path=data_config.data_path,
+                tokenizer=tokenizer,
+                batch_size=training_config.batch_size,
+                max_length=training_config.max_seq_length,
+                shuffle=True,
+                num_workers=training_config.num_workers
+            )
+            
+            # Create evaluation dataloader if eval data path is provided
+            eval_dataloader = None
+            if data_config.eval_data_path:
+                eval_dataloader = create_text_dataloader(
+                    data_path=data_config.eval_data_path,
+                    tokenizer=tokenizer,
+                    batch_size=training_config.eval_batch_size or training_config.batch_size,
+                    max_length=training_config.max_seq_length,
+                    shuffle=False,
+                    num_workers=training_config.num_workers
+                )
+                
+        elif data_config.dataset_type == "dialogue":
+            train_dataloader = create_dialogue_dataloader(
+                data_path=data_config.data_path,
+                tokenizer=tokenizer,
+                batch_size=training_config.batch_size,
+                max_length=training_config.max_seq_length,
+                shuffle=True,
+                num_workers=training_config.num_workers,
+                max_history_turns=data_config.max_history_turns,
+                separate_input_response=data_config.separate_input_response
+            )
+            
+            # Create evaluation dataloader if eval data path is provided
+            eval_dataloader = None
+            if data_config.eval_data_path:
+                eval_dataloader = create_dialogue_dataloader(
+                    data_path=data_config.eval_data_path,
+                    tokenizer=tokenizer,
+                    batch_size=training_config.eval_batch_size or training_config.batch_size,
+                    max_length=training_config.max_seq_length,
+                    shuffle=False,
+                    num_workers=training_config.num_workers,
+                    max_history_turns=data_config.max_history_turns,
+                    separate_input_response=data_config.separate_input_response
+                )
+                
+        elif data_config.dataset_type == "function_calling":
+            train_dataloader = create_function_calling_dataloader(
+                data_path=data_config.data_path,
+                tokenizer=tokenizer,
+                batch_size=training_config.batch_size,
+                max_length=training_config.max_seq_length,
+                shuffle=True,
+                num_workers=training_config.num_workers,
+                function_schema=data_config.function_schema
+            )
+            
+            # Create evaluation dataloader if eval data path is provided
+            eval_dataloader = None
+            if data_config.eval_data_path:
+                eval_dataloader = create_function_calling_dataloader(
+                    data_path=data_config.eval_data_path,
+                    tokenizer=tokenizer,
+                    batch_size=training_config.eval_batch_size or training_config.batch_size,
+                    max_length=training_config.max_seq_length,
+                    shuffle=False,
+                    num_workers=training_config.num_workers,
+                    function_schema=data_config.function_schema
+                )
+                
+        else:
+            # Use generic dataloader creation from config
+            train_dataloader = create_dataloader_from_config(
+                config=data_config.to_dict(),
+                tokenizer=tokenizer,
+                batch_size=training_config.batch_size
+            )
+            
+            # Create evaluation dataloader if eval data path is provided
+            eval_dataloader = None
+            if data_config.eval_data_path:
+                eval_config = data_config.to_dict()
+                eval_config["data_path"] = data_config.eval_data_path
+                
+                eval_dataloader = create_dataloader_from_config(
+                    config=eval_config,
+                    tokenizer=tokenizer,
+                    batch_size=training_config.eval_batch_size or training_config.batch_size
+                )
+        
+        return train_dataloader, eval_dataloader
+        
+    except Exception as e:
+        logger.error(f"Error preparing dataloaders: {e}")
+        raise
+
+
+def train(config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Train a model with the given configuration.
+    
+    Args:
+        config: Training configuration
+        
+    Returns:
+        Dictionary with training results
+    """
+    # Extract configurations
+    model_config = ModelConfig.from_dict(config["model"])
+    training_config = TrainingConfig.from_dict(config["training"])
+    data_config = DataConfig.from_dict(config["data"])
+    
+    # Set up random seed for reproducibility
+    setup_seed(training_config.seed)
+    
+    # Get device
+    device = get_device(training_config.device)
+    logger.info(f"Using device: {device}")
+    
+    # Initialize model
+    model = load_or_create_model(model_config, device)
+    
+    # Get tokenizer from model if available, otherwise create new one
+    tokenizer = getattr(model, "tokenizer", None)
+    if tokenizer is None:
+        logger.info("Creating new tokenizer")
+        from transformers import AutoTokenizer
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model_config.tokenizer_name)
+        except Exception:
+            logger.warning("Failed to load tokenizer, using a basic one")
+            from transformers import PreTrainedTokenizerFast
+            tokenizer = PreTrainedTokenizerFast(
+                vocab_size=model_config.vocab_size,
+                model_max_length=model_config.max_seq_length
+            )
+    
+    # Prepare dataloaders
+    train_dataloader, eval_dataloader = prepare_dataloaders(
+        data_config, training_config, tokenizer
     )
     
-    # Create training config
-    training_config = TrainingConfig(
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
-        max_epochs=args.max_epochs,
-        warmup_steps=args.warmup_steps,
-        accumulation_steps=args.accumulation_steps,
-        save_steps=args.save_steps,
-        eval_steps=args.eval_steps,
-        device=args.device if args.device else "cuda" if torch.cuda.is_available() else "cpu"
+    # Create trainer using factory
+    logger.info("Creating trainer")
+    trainer = TrainerFactory.create_trainer(
+        model=model,
+        train_dataloader=train_dataloader,
+        training_config=training_config,
+        model_config=model_config,
+        data_config=data_config,
+        eval_dataloader=eval_dataloader,
+        trainer_type=training_config.trainer_type
     )
     
-    # Create data config
-    data_config = DataConfig(
-        dataset_name=args.dataset_name,
-        tokenizer_name=args.tokenizer_name,
-        cache_dir=args.cache_dir,
-        preprocessing_num_workers=args.num_workers
-    )
+    # Run training
+    logger.info("Starting training")
+    training_results = trainer.train()
     
-    # Add output directory to training config
-    training_config.output_dir = args.output_dir
+    # Log training results
+    logger.info(f"Training completed in {training_results['training_duration']:.2f} seconds")
+    logger.info(f"Best metric: {training_results['best_metric']}")
     
-    return model_config, training_config, data_config
-
-
-def save_config(config, output_dir, filename="config.json"):
-    """Save configuration to a JSON file."""
-    os.makedirs(output_dir, exist_ok=True)
-    
-    config_dict = {k: v for k, v in config.__dict__.items() 
-                  if not k.startswith('_') and not callable(v)}
-    
-    # Convert any non-serializable types
-    for key, value in config_dict.items():
-        if isinstance(value, torch.device):
-            config_dict[key] = str(value)
-    
-    with open(os.path.join(output_dir, filename), 'w') as f:
-        json.dump(config_dict, f, indent=2)
+    return training_results
 
 
 def main():
-    """Main training function."""
-    # Parse command line arguments
-    args = parse_args()
+    """Main entry point for training."""
+    # Parse arguments
+    config = parse_args()
     
-    # Create configuration objects
-    model_config, training_config, data_config = create_config_from_args(args)
+    # Validate configuration
+    config = validate_config(config)
     
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
-    
-    # Save configurations
-    save_config(model_config, args.output_dir, "model_config.json")
-    save_config(training_config, args.output_dir, "training_config.json")
-    save_config(data_config, args.output_dir, "data_config.json")
-    
-    # Set device
-    device = torch.device(training_config.device)
-    print(f"Using device: {device}")
-    
-    # Initialize tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(data_config.tokenizer_name)
-    tokenizer.pad_token = tokenizer.eos_token
-    
-    # Update vocabulary size in model config
-    model_config.vocab_size = len(tokenizer)
-    
-    # Load datasets
-    print("Loading datasets...")
-    dataloaders = get_wikitext_dataloaders(
-        tokenizer=tokenizer,
-        batch_size=training_config.batch_size,
-        max_length=data_config.max_length,
-        stride=data_config.stride,
-        num_workers=data_config.preprocessing_num_workers,
-        cache_dir=data_config.cache_dir
-    )
-    
-    # Initialize model
-    print("Initializing model...")
-    model = SemanticResonanceModel(model_config)
-    
-    # Print model size
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model size: {total_params:,} parameters ({trainable_params:,} trainable)")
-    
-    # Initialize trainer
-    trainer = Trainer(
-        model=model,
-        config=training_config,
-        train_dataloader=dataloaders["train"],
-        val_dataloader=dataloaders["validation"],
-        test_dataloader=dataloaders["test"],
-        device=device
-    )
-    
-    # Resume from checkpoint if specified
-    if args.resume_from:
-        print(f"Resuming from checkpoint {args.resume_from}")
-        trainer.load_checkpoint(args.resume_from)
-    
-    # Train the model
-    print("Starting training...")
-    train_stats = trainer.train()
-    
-    # Print training statistics
-    print("\nTraining completed!")
-    print(f"Best validation loss: {train_stats['best_val_loss']:.4f}")
-    print(f"Final validation perplexity: {train_stats['val_perplexity']:.2f}")
-    
-    if "test_perplexity" in train_stats:
-        print(f"Test perplexity: {train_stats['test_perplexity']:.2f}")
-    
-    # Apply compression if specified
-    if args.compress_model:
-        print("\nApplying model compression...")
-        compression_config = {
-            "method": "both",
-            "primes": model_config.primes,
-            "threshold": args.compression_threshold,
-            "mask_type": "mod"
-        }
-        
-        compressed_model, compression_ratio = compress_model(model, compression_config)
-        
-        print(f"Compression ratio: {compression_ratio:.2f}x")
-        
-        # Compare models
-        comparison = compare_models(model, compressed_model)
-        for key, value in comparison.items():
-            print(f"{key}: {value}")
-        
-        # Evaluate compressed model
-        print("\nEvaluating compressed model...")
-        compressed_metrics = evaluate_model(
-            compressed_model, 
-            dataloaders["validation"],
-            device
-        )
-        
-        print(f"Compressed model validation perplexity: {compressed_metrics['perplexity']:.2f}")
-        
-        # Save compressed model
-        compressed_path = os.path.join(args.output_dir, "compressed_model")
-        os.makedirs(compressed_path, exist_ok=True)
-        
-        compressed_model.save_pretrained(compressed_path)
-        tokenizer.save_pretrained(compressed_path)
-        
-        print(f"Compressed model saved to {compressed_path}")
+    # Run training
+    try:
+        results = train(config)
+        logger.info("Training completed successfully")
+        return 0
+    except Exception as e:
+        logger.error(f"Error during training: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -1,22 +1,90 @@
 """
-Data package for QLLM.
+Data module for QLLM.
 
-This package contains datasets, dataloaders, and utilities for
-handling data in the Quantum Resonance Language Model.
+This module provides datasets, dataloaders, and utilities for handling
+data in the QLLM system. It has been refactored to reduce code duplication
+and improve maintainability through a hierarchical class structure.
 """
 
-from src.data.dataloaders import get_wikitext_dataloaders
-from src.data.dialogue_dataset import DialogueDataset
-from src.data.tensor_collate import (
-    dialogue_collate_fn,
-    default_collate_fn,
-    tensor_collate_fn
+# Import and expose base classes
+from src.data.base import BaseDataset, BaseLoader, BaseProcessor
+
+# Import and expose dataset implementations
+from src.data.datasets import (
+    TextDataset,
+    DialogueDataset,
+    WikitextDataset,
+    FunctionCallingDataset,
+    MultimodalDataset
+)
+
+# Import and expose loader implementations
+from src.data.loaders import (
+    WikitextLoader,
+    DailyDialogLoader
+    # CustomLoader,  # Not implemented yet
+    # DummyLoader,   # Not implemented yet
+    # RemoteLoader   # Not implemented yet
+)
+
+# Import and expose processor implementations
+from src.data.processors import (
+    TextProcessor
+    # Tokenization,    # Not implemented yet
+    # Augmentation,    # Not implemented yet
+    # Normalization    # Not implemented yet
+)
+
+# Import and expose utility functions
+from src.data.utils import (
+    batch_utils,
+    # dataloader_utils,  # Not implemented yet
+    tensor_collate,
+    # sampling,          # Not implemented yet
+    caching
+)
+
+# Import and expose dataloader factory functions
+from src.data.dataloaders import (
+    create_text_dataloader,
+    create_dialogue_dataloader,
+    create_wikitext_dataloader,
+    create_function_calling_dataloader,
+    create_multimodal_dataloader,
+    create_dataloader_from_config
 )
 
 __all__ = [
-    'get_wikitext_dataloaders',
+    # Base classes
+    'BaseDataset',
+    'BaseLoader',
+    'BaseProcessor',
+    
+    # Datasets
+    'TextDataset',
     'DialogueDataset',
-    'dialogue_collate_fn',
-    'default_collate_fn',
-    'tensor_collate_fn',
+    'WikitextDataset',
+    'FunctionCallingDataset',
+    'MultimodalDataset',
+    
+    # Loaders
+    'WikitextLoader',
+    'DailyDialogLoader',
+    # 'CustomLoader',  # Not implemented yet
+    # 'DummyLoader',   # Not implemented yet
+    # 'RemoteLoader',  # Not implemented yet
+    
+    # Processors
+    'TextProcessor',
+    # 'Tokenization',    # Not implemented yet
+    # 'Augmentation',    # Not implemented yet
+    # 'Normalization',   # Not implemented yet
+    
+    # Dataloader factory functions
+    'create_text_dataloader',
+    'create_dialogue_dataloader',
+    'create_wikitext_dataloader',
+    'create_function_calling_dataloader',
+    'create_multimodal_dataloader',
+    'create_dataloader_from_config'
 ]

@@ -1,728 +1,356 @@
 """
-Unified trainer implementation for the Quantum Resonance Language Model.
+Unified Trainer for QLLM.
 
-This trainer consolidates functionality from all previous trainers (base, standard, 
-enhanced, dialogue) into a single, highly configurable implementation using a 
-composition-based architecture.
+This module provides a unified trainer implementation that simplifies the
+training interface while leveraging the robust base trainer functionality.
+It supports multiple training scenarios through a consistent interface.
 """
 
 import os
 import logging
-import time
-import math
-from typing import Dict, Any, Optional, List, Union, Tuple, Callable
-from dataclasses import dataclass
+from typing import Dict, Any, Optional, List, Tuple, Union, Callable, Type
 
 import torch
 import torch.nn as nn
-from torch.optim import Optimizer
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
-from src.config.model_config import ModelConfig
+from src.training.base_trainer import BaseTrainer
 from src.config.training_config import TrainingConfig
+from src.config.model_config import ModelConfig
 from src.config.data_config import DataConfig
 
-from src.training.model_adapters import ModelAdapter, get_model_adapter
-from src.training.strategies import TrainingStrategy, get_training_strategy
-from src.training.checkpoints import CheckpointManager
-from src.training.extensions import ExtensionManager
-from src.training.metrics import MetricsLogger
+
+logger = logging.getLogger("qllm.training")
 
 
-class UnifiedTrainer:
+class UnifiedTrainer(BaseTrainer):
     """
-    Unified trainer that consolidates functionality from all previous trainers.
+    Unified trainer that supports multiple training scenarios.
     
-    This trainer implementation uses composition rather than inheritance, making it
-    highly configurable through its components (adapters, strategies, managers, etc.)
-    rather than through subclassing.
+    This trainer provides a simplified interface for training different types
+    of models, extending the base trainer with specialized functionality for
+    different training scenarios like text generation, dialogue, empathy, etc.
     """
     
     def __init__(
         self,
-        model_config: ModelConfig,
+        model: nn.Module,
+        train_dataloader: DataLoader,
         training_config: TrainingConfig,
-        data_config: DataConfig,
-        output_dir: Optional[str] = None,
-        logger: Optional[logging.Logger] = None,
-        model_adapter: Optional[ModelAdapter] = None,
-        training_strategy: Optional[TrainingStrategy] = None,
-        extension_manager: Optional[ExtensionManager] = None,
-        checkpoint_manager: Optional[CheckpointManager] = None,
-        metrics_logger: Optional[MetricsLogger] = None
+        model_config: Optional[ModelConfig] = None,
+        data_config: Optional[DataConfig] = None,
+        eval_dataloader: Optional[DataLoader] = None,
+        training_type: str = "standard",
+        metrics_callback: Optional[Callable] = None,
+        **kwargs
     ):
         """
         Initialize the unified trainer.
         
         Args:
-            model_config: Configuration for the model architecture
-            training_config: Configuration for training
-            data_config: Configuration for data loading
-            output_dir: Directory for outputs (checkpoints, logs, etc.)
-            logger: Logger instance
-            model_adapter: Model adapter for model-specific operations
-            training_strategy: Training strategy for optimization approaches
-            extension_manager: Manager for training extensions
-            checkpoint_manager: Manager for checkpoint operations
-            metrics_logger: Logger for training metrics
+            model: Model to train
+            train_dataloader: DataLoader for training data
+            training_config: Training configuration
+            model_config: Optional model configuration
+            data_config: Optional data configuration
+            eval_dataloader: Optional DataLoader for evaluation data
+            training_type: Type of training ("standard", "dialogue", "empathy", etc.)
+            metrics_callback: Optional callback for custom metrics
+            **kwargs: Additional arguments for the base trainer
         """
-        # Store configurations
-        self.model_config = model_config
-        self.training_config = training_config
-        self.data_config = data_config
+        # Store training type
+        self.training_type = training_type
+        self.metrics_callback = metrics_callback
         
-        # Set output directory
-        self.output_dir = output_dir or getattr(training_config, "output_dir", "runs/quantum_resonance")
-        os.makedirs(self.output_dir, exist_ok=True)
-        
-        # Set logger
-        self.logger = logger or logging.getLogger("quantum_resonance")
-        
-        # Initialize state
-        self.model = None
-        self.tokenizer = None
-        self.optimizer = None
-        self.scheduler = None
-        self.dataloaders = {}
-        self.device = self._get_device()
-        self.scaler = None  # For mixed precision training
-        
-        # Set up components (using provided or creating default instances)
-        self._setup_components(
-            model_adapter, 
-            training_strategy, 
-            extension_manager, 
-            checkpoint_manager, 
-            metrics_logger
+        # Initialize base trainer
+        super().__init__(
+            model=model,
+            train_dataloader=train_dataloader,
+            training_config=training_config,
+            model_config=model_config,
+            data_config=data_config,
+            eval_dataloader=eval_dataloader,
+            **kwargs
         )
         
-        # Training state
-        self.current_epoch = 0
-        self.global_step = 0
-        self.best_metric = float('inf')
-        self.training_start_time = None
-        
-        self.logger.info(f"Initialized UnifiedTrainer (output_dir: {self.output_dir})")
+        # Set up training type-specific hooks
+        self._setup_training_type_hooks()
     
-    def _setup_components(
-        self,
-        model_adapter: Optional[ModelAdapter] = None,
-        training_strategy: Optional[TrainingStrategy] = None,
-        extension_manager: Optional[ExtensionManager] = None,
-        checkpoint_manager: Optional[CheckpointManager] = None,
-        metrics_logger: Optional[MetricsLogger] = None
-    ) -> None:
+    def _setup_training_type_hooks(self) -> None:
         """
-        Set up trainer components (adapters, strategies, managers, etc.).
+        Set up hooks based on the training type.
+        """
+        # Add different hooks based on training type
+        if self.training_type == "dialogue":
+            self.add_hook("post_step", self._dialogue_post_step_hook)
+            self.add_hook("pre_eval", self._dialogue_pre_eval_hook)
+        elif self.training_type == "empathy":
+            self.add_hook("post_step", self._empathy_post_step_hook)
+        elif self.training_type == "function_call":
+            self.add_hook("post_step", self._function_call_post_step_hook)
+            self.add_hook("pre_eval", self._function_call_pre_eval_hook)
+        elif self.training_type == "structured_output":
+            self.add_hook("post_step", self._structured_output_post_step_hook)
+        
+        # Add metrics callback if provided
+        if self.metrics_callback is not None:
+            self.add_hook("post_step", self._metrics_callback_hook)
+    
+    def _forward(self, batch: Dict[str, Any], is_training: bool = True) -> Dict[str, Any]:
+        """
+        Forward pass through the model, specialized for the training type.
         
         Args:
-            model_adapter: Optional model adapter
-            training_strategy: Optional training strategy
-            extension_manager: Optional extension manager
-            checkpoint_manager: Optional checkpoint manager
-            metrics_logger: Optional metrics logger
+            batch: Batch of data
+            is_training: Whether this is a training forward pass
+            
+        Returns:
+            Dictionary with model outputs, including loss
         """
-        # Model adapter
-        if model_adapter is not None:
-            self.model_adapter = model_adapter
+        if self.training_type == "dialogue":
+            return self._dialogue_forward(batch, is_training)
+        elif self.training_type == "empathy":
+            return self._empathy_forward(batch, is_training)
+        elif self.training_type == "intent":
+            return self._intent_forward(batch, is_training)
+        elif self.training_type == "function_call":
+            return self._function_call_forward(batch, is_training)
+        elif self.training_type == "structured_output":
+            return self._structured_output_forward(batch, is_training)
         else:
-            model_type = getattr(self.training_config, "model_type", "standard")
-            self.model_adapter = get_model_adapter(
-                model_type,
-                self.model_config,
-                self.training_config,
-                self.device,
-                self.logger
-            )
-        
-        # Training strategy
-        if training_strategy is not None:
-            self.training_strategy = training_strategy
-        else:
-            strategy_type = getattr(self.training_config, "training_strategy", "standard")
-            self.training_strategy = get_training_strategy(
-                strategy_type,
-                self.training_config,
-                self.logger
-            )
-        
-        # Extension manager
-        if extension_manager is not None:
-            self.extension_manager = extension_manager
-        else:
-            self.extension_manager = ExtensionManager(
-                self.training_config,
-                self.logger
-            )
-        
-        # Checkpoint manager
-        if checkpoint_manager is not None:
-            self.checkpoint_manager = checkpoint_manager
-        else:
-            self.checkpoint_manager = CheckpointManager(
-                self.training_config,
-                self.output_dir,
-                self.logger
-            )
-        
-        # Metrics logger
-        if metrics_logger is not None:
-            self.metrics_logger = metrics_logger
-        else:
-            self.metrics_logger = MetricsLogger(
-                self.output_dir,
-                log_to_console=True,
-                log_to_tensorboard=getattr(self.training_config, "use_tensorboard", True),
-                log_to_file=True,
-                logger=self.logger
-            )
+            # Standard forward pass
+            return super()._forward(batch, is_training)
     
-    def _get_device(self) -> torch.device:
+    def _dialogue_forward(self, batch: Dict[str, Any], is_training: bool = True) -> Dict[str, Any]:
         """
-        Get device based on configuration.
-        
-        Returns:
-            Device to use for training
-        """
-        from src.utils.device import get_device
-        return get_device(getattr(self.training_config, "device", None))
-    
-    # -------------------------------------------------------------------
-    # Initialization methods
-    # -------------------------------------------------------------------
-    
-    def initialize_model(self) -> nn.Module:
-        """
-        Initialize the model.
-        
-        Returns:
-            Initialized model
-        """
-        self.logger.info("Initializing model")
-        self.model = self.model_adapter.create_model()
-        self.model.to(self.device)
-        
-        # Set model in the adapter for consistency
-        if hasattr(self.model_adapter, "set_model"):
-            self.model_adapter.set_model(self.model)
-        
-        return self.model
-    
-    def initialize_tokenizer(self) -> Any:
-        """
-        Initialize the tokenizer.
-        
-        Returns:
-            Initialized tokenizer
-        """
-        self.logger.info("Initializing tokenizer")
-        self.tokenizer = self.model_adapter.create_tokenizer()
-        
-        # Set tokenizer in the adapter for consistency
-        if hasattr(self.model_adapter, "set_tokenizer"):
-            self.model_adapter.set_tokenizer(self.tokenizer)
-        
-        return self.tokenizer
-    
-    def initialize_dataloaders(self) -> Dict[str, DataLoader]:
-        """
-        Initialize data loaders.
-        
-        Returns:
-            Dictionary of data loaders
-        """
-        self.logger.info("Initializing dataloaders")
-        
-        # Import dataloader utils
-        from src.data.dataloader_utils import create_dataloaders
-        
-        # Create dataloaders
-        self.dataloaders = create_dataloaders(
-            self.data_config,
-            self.tokenizer,
-            self.training_config.batch_size,
-            getattr(self.training_config, "num_workers", 4)
-        )
-        
-        return self.dataloaders
-    
-    def initialize_optimizer(self) -> Tuple[Optimizer, Any]:
-        """
-        Initialize optimizer and scheduler.
-        
-        Returns:
-            Tuple of (optimizer, scheduler)
-        """
-        self.logger.info("Initializing optimizer and scheduler")
-        
-        # Determine optimizer type
-        optimizer_type = getattr(self.training_config, "optimizer", "adamw")
-        
-        # Create optimizer using strategy
-        self.optimizer = self.training_strategy.create_optimizer(
-            self.model,
-            optimizer_type=optimizer_type,
-            lr=self.training_config.learning_rate,
-            weight_decay=self.training_config.weight_decay
-        )
-        
-        # Determine scheduler type
-        scheduler_type = getattr(self.training_config, "lr_scheduler", "cosine")
-        
-        # Calculate training steps
-        if "train" not in self.dataloaders:
-            self.logger.warning("Training dataloader not initialized. Cannot calculate number of training steps.")
-            num_training_steps = 1000
-        else:
-            train_dataloader = self.dataloaders["train"]
-            steps_per_epoch = len(train_dataloader)
-            num_training_steps = steps_per_epoch * self.training_config.max_epochs
-        
-        # Calculate number of warmup steps
-        warmup_ratio = getattr(self.training_config, "warmup_ratio", 0.1)
-        num_warmup_steps = int(warmup_ratio * num_training_steps)
-        
-        # Create scheduler using strategy
-        self.scheduler = self.training_strategy.create_scheduler(
-            self.optimizer,
-            scheduler_type=scheduler_type,
-            num_training_steps=num_training_steps,
-            num_warmup_steps=num_warmup_steps
-        )
-        
-        # Initialize gradient scaler for mixed precision training if enabled
-        self.scaler = None
-        if getattr(self.training_config, "use_mixed_precision", True) and torch.cuda.is_available():
-            self.scaler = torch.cuda.amp.GradScaler()
-        
-        return self.optimizer, self.scheduler
-    
-    def initialize_all(self) -> None:
-        """
-        Initialize all components in the correct order.
-        """
-        self.initialize_model()
-        self.initialize_tokenizer()
-        self.initialize_dataloaders()
-        self.initialize_optimizer()
-        self._save_config()  # Save configuration for reproducibility
-    
-    def _save_config(self) -> None:
-        """Save configuration to output directory."""
-        # Create output directory if it doesn't exist
-        os.makedirs(self.output_dir, exist_ok=True)
-        
-        # Save config if possible
-        config_path = os.path.join(self.output_dir, "config.json")
-        try:
-            from src.config.config_manager import ConfigManager
-            config_manager = ConfigManager()
-            
-            # Convert config objects to dict
-            config_dict = {
-                "model": config_manager.model_config_to_dict(self.model_config),
-                "training": config_manager.training_config_to_dict(self.training_config),
-                "data": config_manager.data_config_to_dict(self.data_config)
-            }
-            
-            # Save config
-            config_manager.save_config(config_dict, config_path)
-            self.logger.info(f"Saved configuration to {config_path}")
-        except Exception as e:
-            self.logger.warning(f"Failed to save configuration: {e}")
-    
-    # -------------------------------------------------------------------
-    # Training methods
-    # -------------------------------------------------------------------
-    
-    def train(self) -> Dict[str, float]:
-        """
-        Train the model.
-        
-        Returns:
-            Dictionary of final metrics
-        """
-        self.logger.info("Starting training")
-        self.training_start_time = time.time()
-        
-        # Initialize components if needed
-        if self.model is None:
-            self.initialize_all()
-        
-        # Get training parameters
-        max_epochs = self.training_config.max_epochs
-        accumulation_steps = getattr(self.training_config, "accumulation_steps", 1)
-        logging_steps = getattr(self.training_config, "logging_steps", 10)
-        
-        # No direct "training start" hook in ExtensionManager
-        self.logger.info("Starting training")
-        
-        # Train for specified number of epochs
-        for epoch in range(self.current_epoch, max_epochs):
-            self.current_epoch = epoch
-            self.logger.info(f"Starting epoch {epoch + 1}/{max_epochs}")
-            
-            # Execute epoch start hooks
-            self.extension_manager.pre_epoch(self.model, epoch)
-            
-            # Train for one epoch
-            metrics = self._train_epoch(
-                epoch=epoch,
-                accumulation_steps=accumulation_steps,
-                logging_steps=logging_steps
-            )
-            
-            # Evaluate at the end of the epoch
-            if "validation" in self.dataloaders:
-                eval_metrics = self.evaluate("validation")
-                # Add validation metrics to epoch metrics
-                metrics.update({f"eval_{k}": v for k, v in eval_metrics.items()})
-                # Log validation metrics separately
-                self.metrics_logger.log_validation_metrics(eval_metrics, epoch=epoch)
-            
-            # Log epoch metrics
-            self.metrics_logger.log_epoch_metrics(metrics, epoch=epoch)
-            
-            # Save checkpoint
-            if getattr(self.training_config, "save_every_epoch", True):
-                self.checkpoint_manager.save_checkpoint(
-                    model=self.model,
-                    optimizer=self.optimizer,
-                    epoch=epoch,
-                    metrics=metrics,
-                    step=self.global_step
-                )
-            
-            # Execute epoch end hooks
-            self.extension_manager.post_epoch(self.model, epoch, metrics)
-        
-        # Training complete
-        total_time = time.time() - self.training_start_time
-        self.logger.info(f"Training complete. Total time: {total_time:.2f}s")
-        
-        # No direct training end hook, but we can log completion
-        
-        return metrics
-        
-    def train_epoch(self) -> Dict[str, float]:
-        """
-        Train for one epoch (public method to match enhanced_trainer API).
-        
-        Returns:
-            Dictionary of metrics for the epoch
-        """
-        self.logger.info(f"Training epoch {self.current_epoch + 1}")
-        
-        # Make sure model is in training mode
-        self.model.train()
-        
-        # Train for one epoch using the internal implementation
-        metrics = self._train_epoch(
-            epoch=self.current_epoch,
-            accumulation_steps=getattr(self.training_config, "accumulation_steps", 1),
-            logging_steps=getattr(self.training_config, "logging_steps", 10)
-        )
-        
-        # Return metrics in the expected format
-        return {
-            "train_loss": metrics["loss"],
-            "epoch_time": metrics["epoch_time"]
-        }
-    
-    def _train_epoch(
-        self, 
-        epoch: int, 
-        accumulation_steps: int = 1,
-        logging_steps: int = 10
-    ) -> Dict[str, float]:
-        """
-        Train for one epoch.
+        Forward pass for dialogue training.
         
         Args:
-            epoch: Current epoch number
-            accumulation_steps: Number of steps to accumulate gradients
-            logging_steps: Number of steps between logging
+            batch: Batch of data
+            is_training: Whether this is a training forward pass
             
         Returns:
-            Dictionary of epoch metrics
+            Dictionary with model outputs
         """
-        if "train" not in self.dataloaders:
-            raise ValueError("Training dataloader not found. Call initialize_dataloaders() first.")
+        # Extract dialogue-specific inputs
+        input_ids = batch.get("input_ids")
+        attention_mask = batch.get("attention_mask")
+        response_ids = batch.get("response_ids")
         
-        train_dataloader = self.dataloaders["train"]
-        self.model.train()
-        
-        total_loss = 0.0
-        epoch_step = 0
-        epoch_start_time = time.time()
-        
-        # Set up batch metrics
-        batch_metrics = {}
-        
-        # Training loop
-        for batch_idx, batch in enumerate(train_dataloader):
-            # Prepare batch
-            prepared_batch = self.model_adapter.prepare_batch(batch)
+        # Prepare labels for dialogue training
+        if "labels" not in batch and response_ids is not None:
+            # Create shifted labels from response for causal language modeling
+            labels = response_ids.clone()
+            # Mask input part with -100
+            if "input_lengths" in batch:
+                input_lengths = batch["input_lengths"]
+                for i, length in enumerate(input_lengths):
+                    labels[i, :length] = -100
             
-            # Execute batch start hooks
-            self.extension_manager.pre_batch(self.model, prepared_batch)
-            
-            # Forward pass using model adapter
-            with torch.amp.autocast('cuda', enabled=self.scaler is not None):
-                outputs = self.model_adapter.forward(self.model, prepared_batch)
-                loss = self.model_adapter.compute_loss(outputs, prepared_batch)
-                loss = loss / accumulation_steps
-            
-            # Backward pass with gradient accumulation
-            if self.scaler is not None:
-                self.scaler.scale(loss).backward()
-            else:
-                loss.backward()
-            
-            # Update metrics
-            batch_loss = loss.item() * accumulation_steps
-            total_loss += batch_loss
-            batch_metrics["loss"] = batch_loss
-            
-            # Execute batch end hooks
-            self.extension_manager.post_batch(
-                self.model, prepared_batch, loss, self.global_step
-            )
-            
-            # Optimizer step after accumulation or at end of dataloader
-            if (batch_idx + 1) % accumulation_steps == 0 or batch_idx == len(train_dataloader) - 1:
-                # Gradient clipping
-                max_grad_norm = getattr(self.training_config, "max_grad_norm", 1.0)
-                if max_grad_norm > 0:
-                    if self.scaler is not None:
-                        self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
-                
-                # Optimizer step
-                if self.scaler is not None:
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                else:
-                    self.optimizer.step()
-                
-                # Scheduler step
-                if self.scheduler is not None:
-                    self.scheduler.step()
-                
-                # Zero gradients
-                self.optimizer.zero_grad()
-                
-                # Update global step
-                self.global_step += 1
-                epoch_step += 1
-                
-                # Log progress
-                if epoch_step % logging_steps == 0:
-                    avg_loss = total_loss / epoch_step
-                    lr = self.optimizer.param_groups[0]['lr']
-                    progress = batch_idx / len(train_dataloader) * 100
-                    examples_per_second = (batch_idx + 1) * len(prepared_batch["input_ids"]) / (time.time() - epoch_start_time)
-                    
-                    self.logger.info(
-                        f"Epoch: {epoch+1}/{self.training_config.max_epochs} | "
-                        f"Step: {epoch_step}/{len(train_dataloader)} ({progress:.1f}%) | "
-                        f"Loss: {avg_loss:.4f} | "
-                        f"LR: {lr:.6f} | "
-                        f"Examples/sec: {examples_per_second:.1f}"
-                    )
-                    
-                    # Log to metrics logger
-                    step_metrics = {
-                        "loss": avg_loss,
-                        "learning_rate": lr,
-                        "examples_per_second": examples_per_second
-                    }
-                    self.metrics_logger.log_training_step(
-                        step_metrics,
-                        step=self.global_step
-                    )
+            # Add labels to batch
+            batch["labels"] = labels
         
-        # Compute epoch metrics
-        epoch_loss = total_loss / epoch_step
-        epoch_time = time.time() - epoch_start_time
+        # Forward pass
+        outputs = self.model(**batch)
         
-        self.logger.info(
-            f"Epoch {epoch+1} completed in {epoch_time:.2f}s | "
-            f"Loss: {epoch_loss:.4f}"
-        )
-        
-        return {
-            "loss": epoch_loss,
-            "epoch_time": epoch_time
-        }
-    
-    # -------------------------------------------------------------------
-    # Evaluation methods
-    # -------------------------------------------------------------------
-    
-    def evaluate(self, split: str = "validation") -> Dict[str, float]:
-        """
-        Evaluate the model on the specified data split.
-        
-        Args:
-            split: Data split to evaluate on ('validation', 'test', etc.)
-            
-        Returns:
-            Dictionary of evaluation metrics
-        """
-        self.logger.info(f"Evaluating on {split} split")
-        
-        if split not in self.dataloaders:
-            raise ValueError(f"Data split '{split}' not found in dataloaders.")
-        
-        # Set model to evaluation mode
-        self.model.eval()
-        
-        # Get dataloader
-        eval_dataloader = self.dataloaders[split]
-        
-        # Execute evaluation start hooks
-        self.extension_manager.pre_validation(self.model)
-        
-        # Evaluation loop
-        total_loss = 0.0
-        total_samples = 0
-        all_outputs = []
-        all_labels = []
-        
-        with torch.no_grad():
-            for batch in eval_dataloader:
-                # Prepare batch
-                prepared_batch = self.model_adapter.prepare_batch(batch)
-                batch_size = len(prepared_batch["input_ids"])
-                total_samples += batch_size
-                
-                # Forward pass
-                outputs = self.model_adapter.forward(self.model, prepared_batch)
-                loss = self.model_adapter.compute_loss(outputs, prepared_batch)
-                
-                # Update metrics
-                total_loss += loss.item() * batch_size
-                
-                # Store outputs for metric calculation
-                if "labels" in prepared_batch:
-                    all_outputs.append(outputs)
-                    all_labels.append(prepared_batch["labels"])
-        
-        # Calculate metrics
-        metrics = {"loss": total_loss / total_samples}
-        
-        # Calculate additional metrics if possible
-        if all_outputs and all_labels:
-            additional_metrics = self._calculate_metrics(all_outputs, all_labels)
-            metrics.update(additional_metrics)
-        
-        # Log evaluation metrics
-        self.logger.info(f"Evaluation results ({split}): {metrics}")
-        
-        # Execute evaluation end hooks
-        self.extension_manager.post_validation(self.model, metrics)
-        
-        return metrics
-    
-    def _calculate_metrics(self, outputs: List[Any], labels: List[torch.Tensor]) -> Dict[str, float]:
-        """
-        Calculate additional metrics from outputs and labels.
-        
-        Args:
-            outputs: Model outputs
-            labels: Ground truth labels
-            
-        Returns:
-            Dictionary of additional metrics
-        """
-        # This is a placeholder - specific implementations can override this
-        # to add more sophisticated metrics calculations
-        return {}
-
-    # -------------------------------------------------------------------
-    # Prediction methods
-    # -------------------------------------------------------------------
-    
-    def predict(self, inputs: Union[str, List[str], Dict[str, torch.Tensor]]) -> Any:
-        """
-        Generate predictions for the given inputs.
-        
-        Args:
-            inputs: Input text or tensors
-            
-        Returns:
-            Model predictions
-        """
-        # Ensure model is initialized and in eval mode
-        if self.model is None:
-            raise ValueError("Model not initialized. Call initialize_model() first.")
-        
-        self.model.eval()
-        
-        # Convert inputs to tensor format if needed
-        if isinstance(inputs, str) or (isinstance(inputs, list) and isinstance(inputs[0], str)):
-            if self.tokenizer is None:
-                raise ValueError("Tokenizer not initialized. Call initialize_tokenizer() first.")
-            
-            # Tokenize inputs
-            encoded_inputs = self.tokenizer(
-                inputs, 
-                return_tensors="pt", 
-                padding=True, 
-                truncation=True
-            )
-            encoded_inputs = {k: v.to(self.device) for k, v in encoded_inputs.items()}
-        else:
-            # Assume inputs are already properly formatted
-            encoded_inputs = inputs
-            if isinstance(encoded_inputs, dict):
-                encoded_inputs = {k: v.to(self.device) for k, v in encoded_inputs.items()}
-        
-        # Generate predictions
-        with torch.no_grad():
-            outputs = self.model(**encoded_inputs)
+        # Add dialogue-specific metrics
+        if "loss" in outputs and hasattr(outputs, "get"):
+            # Calculate perplexity
+            perplexity = torch.exp(outputs["loss"])
+            outputs["perplexity"] = perplexity
         
         return outputs
     
-    # -------------------------------------------------------------------
-    # Checkpoint methods
-    # -------------------------------------------------------------------
-    
-    def save_checkpoint(self, path: Optional[str] = None) -> str:
+    def _empathy_forward(self, batch: Dict[str, Any], is_training: bool = True) -> Dict[str, Any]:
         """
-        Save model checkpoint.
+        Forward pass for empathy training.
         
         Args:
-            path: Path to save checkpoint (default: auto-generated in output_dir)
+            batch: Batch of data
+            is_training: Whether this is a training forward pass
             
         Returns:
-            Path where checkpoint was saved
+            Dictionary with model outputs
         """
-        return self.checkpoint_manager.save_checkpoint(
-            model=self.model,
-            optimizer=self.optimizer,
-            epoch=self.current_epoch,
-            step=self.global_step
-        )
+        # Add empathy-specific processing here
+        # e.g., adding empathy labels or weights
+        
+        # Forward pass
+        outputs = self.model(**batch)
+        
+        # Add empathy-specific metrics
+        if "empathy_scores" in batch and "loss" in outputs:
+            # Calculate weighted empathy loss
+            empathy_weights = batch.get("empathy_weights", torch.ones_like(batch["empathy_scores"]))
+            empathy_loss = outputs["loss"] * empathy_weights.mean()
+            outputs["empathy_loss"] = empathy_loss
+        
+        return outputs
     
-    def load_checkpoint(self, path: str) -> None:
+    def _intent_forward(self, batch: Dict[str, Any], is_training: bool = True) -> Dict[str, Any]:
         """
-        Load model checkpoint.
+        Forward pass for intent classification training.
         
         Args:
-            path: Path to checkpoint
+            batch: Batch of data
+            is_training: Whether this is a training forward pass
+            
+        Returns:
+            Dictionary with model outputs
         """
-        state = self.checkpoint_manager.load_checkpoint(
-            model=self.model,
-            optimizer=self.optimizer,
-            path=path
-        )
+        # Add intent-specific processing
+        if "intent_labels" in batch and "labels" not in batch:
+            batch["labels"] = batch["intent_labels"]
         
-        if state and "epoch" in state:
-            self.current_epoch = state["epoch"] + 1
+        # Forward pass
+        outputs = self.model(**batch)
         
-        if state and "global_step" in state:
-            self.global_step = state["global_step"]
+        # Add intent-specific metrics
+        if "logits" in outputs and "labels" in batch:
+            # Calculate accuracy
+            predictions = torch.argmax(outputs["logits"], dim=-1)
+            accuracy = (predictions == batch["labels"]).float().mean()
+            outputs["accuracy"] = accuracy
         
-        self.logger.info(f"Loaded checkpoint from {path}")
+        return outputs
+    
+    def _function_call_forward(self, batch: Dict[str, Any], is_training: bool = True) -> Dict[str, Any]:
+        """
+        Forward pass for function call training.
+        
+        Args:
+            batch: Batch of data
+            is_training: Whether this is a training forward pass
+            
+        Returns:
+            Dictionary with model outputs
+        """
+        # Handle function call-specific processing
+        if "function_name" in batch and "parameters" in batch:
+            # Combine function call components if needed
+            batch["function_call"] = {
+                "name": batch["function_name"],
+                "parameters": batch["parameters"]
+            }
+        
+        # Forward pass
+        outputs = self.model(**batch)
+        
+        # Add function call-specific metrics
+        if "function_name_accuracy" not in outputs and "logits" in outputs and "function_name" in batch:
+            # Calculate function name accuracy
+            name_predictions = outputs.get("function_name_predictions")
+            if name_predictions is not None:
+                name_accuracy = (name_predictions == batch["function_name"]).float().mean()
+                outputs["function_name_accuracy"] = name_accuracy
+        
+        return outputs
+    
+    def _structured_output_forward(self, batch: Dict[str, Any], is_training: bool = True) -> Dict[str, Any]:
+        """
+        Forward pass for structured output training.
+        
+        Args:
+            batch: Batch of data
+            is_training: Whether this is a training forward pass
+            
+        Returns:
+            Dictionary with model outputs
+        """
+        # Handle structured output-specific processing
+        if "structure_labels" in batch and "labels" not in batch:
+            batch["labels"] = batch["structure_labels"]
+        
+        # Forward pass
+        outputs = self.model(**batch)
+        
+        # Add structured output-specific metrics
+        if "structure_accuracy" not in outputs and "predictions" in outputs and "structure_labels" in batch:
+            # Calculate structure accuracy
+            structure_accuracy = (outputs["predictions"] == batch["structure_labels"]).float().mean()
+            outputs["structure_accuracy"] = structure_accuracy
+        
+        return outputs
+    
+    # Training type-specific hooks
+    
+    def _dialogue_post_step_hook(self, **kwargs) -> None:
+        """Hook for dialogue-specific post-step processing."""
+        metrics = kwargs.get("metrics", {})
+        if "perplexity" in metrics:
+            # Log perplexity
+            logger.info(f"Dialogue perplexity: {metrics['perplexity']:.4f}")
+    
+    def _dialogue_pre_eval_hook(self, **kwargs) -> None:
+        """Hook for dialogue-specific pre-evaluation processing."""
+        # Setup for dialogue evaluation
+        if hasattr(self.model, "prepare_for_dialogue_evaluation"):
+            self.model.prepare_for_dialogue_evaluation()
+    
+    def _empathy_post_step_hook(self, **kwargs) -> None:
+        """Hook for empathy-specific post-step processing."""
+        metrics = kwargs.get("metrics", {})
+        if "empathy_loss" in metrics:
+            # Log empathy loss
+            logger.info(f"Empathy loss: {metrics['empathy_loss']:.4f}")
+    
+    def _function_call_post_step_hook(self, **kwargs) -> None:
+        """Hook for function call-specific post-step processing."""
+        metrics = kwargs.get("metrics", {})
+        if "function_name_accuracy" in metrics:
+            # Log function name accuracy
+            logger.info(f"Function name accuracy: {metrics['function_name_accuracy']:.4f}")
+    
+    def _function_call_pre_eval_hook(self, **kwargs) -> None:
+        """Hook for function call-specific pre-evaluation processing."""
+        # Setup for function call evaluation
+        if hasattr(self.model, "prepare_for_function_call_evaluation"):
+            self.model.prepare_for_function_call_evaluation()
+    
+    def _structured_output_post_step_hook(self, **kwargs) -> None:
+        """Hook for structured output-specific post-step processing."""
+        metrics = kwargs.get("metrics", {})
+        if "structure_accuracy" in metrics:
+            # Log structure accuracy
+            logger.info(f"Structure accuracy: {metrics['structure_accuracy']:.4f}")
+    
+    def _metrics_callback_hook(self, **kwargs) -> None:
+        """Hook for custom metrics calculation using the callback."""
+        if self.metrics_callback is not None:
+            # Call metrics callback with current state
+            try:
+                custom_metrics = self.metrics_callback(
+                    model=self.model,
+                    step=self.global_step,
+                    epoch=self.epoch,
+                    metrics=kwargs.get("metrics", {}),
+                    batch=kwargs.get("batch", None)
+                )
+                
+                # Log custom metrics
+                if custom_metrics:
+                    for key, value in custom_metrics.items():
+                        logger.info(f"Custom metric {key}: {value:.4f}")
+            except Exception as e:
+                logger.error(f"Error in metrics callback: {e}")
+    
+    def update_training_type(self, training_type: str) -> None:
+        """
+        Update the training type during training.
+        
+        Args:
+            training_type: New training type
+        """
+        # Update training type
+        self.training_type = training_type
+        
+        # Clear and re-setup hooks
+        self.pre_step_hooks = []
+        self.post_step_hooks = []
+        self.pre_eval_hooks = []
+        self.post_eval_hooks = []
+        
+        # Setup new hooks
+        self._setup_training_type_hooks()
+        
+        logger.info(f"Updated training type to: {training_type}")
