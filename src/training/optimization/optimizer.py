@@ -388,3 +388,50 @@ def get_optimizer_parameters(optimizer: Optimizer) -> Dict[str, Any]:
     }
     
     return params
+
+
+def apply_gradients(
+    optimizer: Optimizer,
+    grad_scaler: Optional[Any] = None,
+    max_grad_norm: float = 1.0,
+    **kwargs
+) -> float:
+    """
+    Apply gradients to optimizer with optional gradient clipping and scaling.
+    
+    Args:
+        optimizer: Optimizer to apply gradients to
+        grad_scaler: Optional gradient scaler for mixed precision training
+        max_grad_norm: Maximum gradient norm for clipping
+        **kwargs: Additional arguments
+        
+    Returns:
+        Gradient norm
+    """
+    grad_norm = 0.0
+    
+    # Clip gradients if max_grad_norm is specified
+    if max_grad_norm > 0:
+        if grad_scaler is not None and hasattr(grad_scaler, "unscale_"):
+            # Unscale gradients for accurate clipping with AMP
+            grad_scaler.unscale_(optimizer)
+        
+        # Compute gradient norm for all parameters
+        parameters = []
+        for param_group in optimizer.param_groups:
+            parameters.extend([p for p in param_group['params'] if p.grad is not None])
+        
+        if parameters:
+            # Clip gradients in-place
+            grad_norm = torch.nn.utils.clip_grad_norm_(parameters, max_grad_norm).item()
+    
+    # Apply gradients
+    if grad_scaler is not None and hasattr(grad_scaler, "step"):
+        # Use gradient scaler for mixed precision
+        grad_scaler.step(optimizer)
+        grad_scaler.update()
+    else:
+        # Standard optimizer step
+        optimizer.step()
+    
+    return grad_norm
