@@ -867,6 +867,68 @@ class TrainerCore:
             extension_data=extension_data
         )
     
+    def save_checkpoint(
+        self,
+        path: Optional[str] = None,
+        is_best: bool = False
+    ) -> None:
+        """
+        Public interface to save a checkpoint at a specific path.
+        
+        Args:
+            path: Path to save the checkpoint (if None, uses default naming)
+            is_best: Whether this is the best checkpoint so far
+        """
+        if self.checkpoint_manager is None:
+            logger.warning("No checkpoint manager available, creating temporary one")
+            from src.training.checkpoints.checkpoint_manager import CheckpointManager
+            
+            # Create a default output directory if needed
+            os.makedirs(self.output_dir, exist_ok=True)
+            
+            # Create a temporary checkpoint manager
+            self.checkpoint_manager = CheckpointManager(
+                checkpoint_dir=self.output_dir
+            )
+        
+        if path is not None:
+            # Direct save through checkpoint manager with specified path
+            # Get additional metadata from extensions
+            extension_data = {}
+            if self.extension_manager is not None:
+                extension_result = self.extension_manager.run_hook(
+                    "on_save_checkpoint",
+                    trainer=self
+                )
+                if extension_result:
+                    extension_data = extension_result
+            
+            # Prepare metrics
+            metrics = {
+                "train_loss": self.metrics_logger.get_latest_metric("train", "loss"),
+                "val_loss": self.metrics_logger.get_latest_metric("val", "loss"),
+                "best_val_loss": getattr(self, "best_val_loss", float('inf'))
+            }
+            
+            # Save checkpoint
+            try:
+                self.checkpoint_manager.save_checkpoint(
+                    model=self.model,
+                    optimizer=self.optimizer,
+                    scheduler=self.scheduler,
+                    epoch=self.epoch,
+                    global_step=self.global_step,
+                    metrics=metrics,
+                    path=path,
+                    extension_data=extension_data
+                )
+                logger.info(f"Checkpoint saved to {path}")
+            except Exception as e:
+                logger.error(f"Error saving checkpoint to {path}: {e}")
+        else:
+            # Use internal logic
+            self._save_checkpoint(is_best=is_best)
+    
     def load_checkpoint(
         self,
         path: Optional[str] = None
