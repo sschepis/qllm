@@ -976,3 +976,65 @@ class TrainerCore:
             Dictionary of metrics history
         """
         return self.metrics_logger.get_metrics_history()
+    
+    # Adapter methods to match the expected interface in menu_handlers.py
+    def initialize_model(self) -> None:
+        """
+        Initialize the model if it hasn't been initialized yet.
+        This is an adapter method to match the interface expected by menu_handlers.py.
+        """
+        if self.model_adapter and not self.model_adapter.get_model():
+            logger.info("Initializing model through model adapter")
+            self.model_adapter.create_model()
+        elif not self.model_adapter:
+            logger.error("Cannot initialize model: model_adapter is None")
+        else:
+            logger.info("Model already initialized")
+    
+    def initialize_tokenizer(self) -> None:
+        """
+        Initialize the tokenizer if it hasn't been initialized yet.
+        This is an adapter method to match the interface expected by menu_handlers.py.
+        """
+        if self.model_adapter and not self.model_adapter.get_tokenizer():
+            logger.info("Initializing tokenizer through model adapter")
+            self.model_adapter.create_tokenizer()
+        elif not self.model_adapter:
+            logger.error("Cannot initialize tokenizer: model_adapter is None")
+        else:
+            logger.info("Tokenizer already initialized")
+    
+    def initialize_dataloaders(self) -> None:
+        """
+        Initialize the dataloaders if they haven't been initialized yet.
+        This is an adapter method to match the interface expected by menu_handlers.py.
+        """
+        if self.dataset_adapter and not hasattr(self, 'train_dataloader'):
+            logger.info("Initializing dataloaders through dataset adapter")
+            self.train_dataloader = self.dataset_adapter.get_train_dataloader()
+            self.val_dataloader = self.dataset_adapter.get_val_dataloader()
+        elif not self.dataset_adapter:
+            logger.error("Cannot initialize dataloaders: dataset_adapter is None")
+        else:
+            logger.info("Dataloaders already initialized")
+    
+    def initialize_optimizer(self) -> None:
+        """
+        Initialize the optimizer and scheduler if they haven't been initialized yet.
+        This is an adapter method to match the interface expected by menu_handlers.py.
+        """
+        if not hasattr(self, 'optimizer') or self.optimizer is None:
+            if self.model_adapter and self.model_adapter.get_model():
+                logger.info("Initializing optimizer")
+                self.optimizer = create_optimizer(
+                    self.model_adapter.get_model(),
+                    self.config
+                )
+                self.lr_scheduler = create_scheduler(
+                    self.optimizer,
+                    self.config
+                )
+            else:
+                logger.error("Cannot initialize optimizer: model not initialized")
+        else:
+            logger.info("Optimizer already initialized")
