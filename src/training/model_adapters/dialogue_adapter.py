@@ -252,13 +252,20 @@ class DialogueModelAdapter(ModelAdapter):
                     if attention_mask.size(0) == bs * seq_len:
                         batch['attention_mask'] = attention_mask.view(bs, seq_len)
                     else:
-                        # Create new mask of correct size
-                        batch['attention_mask'] = torch.ones_like(batch['input_ids']).bool()
+                        # Create new mask of correct size - use float not bool
+                        batch['attention_mask'] = torch.ones_like(batch['input_ids'], dtype=torch.float)
+                
+                # Convert boolean tensor to float tensor for subtraction operations
+                if batch['attention_mask'].dtype == torch.bool:
+                    self.logger.warning("Converting attention_mask from bool to float")
+                    batch['attention_mask'] = batch['attention_mask'].float()
                 
                 # Check if key_padding_mask is needed instead of attention_mask
                 if hasattr(model, 'encoder') and hasattr(model.encoder, 'layers'):
                     # Add key_padding_mask for transformer models
-                    batch['key_padding_mask'] = batch['attention_mask']
+                    if 'key_padding_mask' not in batch:
+                        # Make sure this is a float tensor too
+                        batch['key_padding_mask'] = batch['attention_mask'].float()
             
             # Forward pass through model
             outputs = model(**batch, return_dict=return_dict)

@@ -330,7 +330,15 @@ class StandardTrainingStrategy(TrainingStrategy):
                 )
             except Exception as e:
                 self.logger.error(f"Error computing metrics: {e}")
-                metrics = {"loss": loss.item() if not isinstance(loss, float) else loss}
+                # Handle any type of loss variable, including strings from error messages
+                if isinstance(loss, torch.Tensor) and hasattr(loss, 'item'):
+                    metrics = {"loss": loss.item()}
+                elif isinstance(loss, (int, float)):
+                    metrics = {"loss": float(loss)}
+                else:
+                    # Convert anything else to string and use a default value
+                    self.logger.error(f"Unexpected loss type: {type(loss)}, value: {str(loss)}")
+                    metrics = {"loss": 0.0}
         
         # Now do the actual gradient step with update_gradients=True
         try:
