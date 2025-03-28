@@ -341,5 +341,61 @@ class DialogueDatasetAdapter(StandardDatasetAdapter):
                     formatted_example[key] = value
             
             formatted_examples.append(formatted_example)
+            
+            return formatted_examples
         
-        return formatted_examples
+        def get_train_dataloader(self) -> Optional[DataLoader]:
+            """
+            Get the training dataloader.
+            
+            Returns:
+                Training dataloader or None if not available
+            """
+            # Create dataloaders if we don't have them already
+            if not hasattr(self, '_train_dataloader') or self._train_dataloader is None:
+                train_batch_size = getattr(self.config, "batch_size", 8)
+                eval_batch_size = getattr(self.config, "eval_batch_size", train_batch_size)
+                
+                self._train_dataloader, self._val_dataloader, self._test_dataloader = self.create_dataloaders(
+                    train_batch_size=train_batch_size,
+                    eval_batch_size=eval_batch_size
+                )
+            
+            return self._train_dataloader
+        
+        def get_val_dataloader(self) -> Optional[DataLoader]:
+            """
+            Get the validation dataloader.
+            
+            Returns:
+                Validation dataloader or None if not available
+            """
+            # Make sure we've initialized the dataloaders
+            if not hasattr(self, '_val_dataloader') or self._val_dataloader is None:
+                self.get_train_dataloader()
+                
+            return self._val_dataloader
+        
+        def prepare_batch(self, batch: Dict[str, Any], is_train: bool = True) -> Dict[str, torch.Tensor]:
+            """
+            Prepare a batch for the model, ensuring all tensors have the correct type.
+            
+            Args:
+                batch: Input batch to prepare
+                is_train: Whether the batch is for training
+                
+            Returns:
+                Prepared batch with correct tensor types
+            """
+            # First process the batch with the standard method
+            processed_batch = self.process_batch(batch, is_train)
+            
+            # Ensure input_ids and labels are integers, not floats
+            for key in ['input_ids', 'labels']:
+                if key in processed_batch and isinstance(processed_batch[key], torch.Tensor):
+                    if processed_batch[key].dtype != torch.long:
+                        # Convert to LongTensor for embedding layers
+                        self.logger.info(f"Converting {key} from {processed_batch[key].dtype} to torch.long")
+                        processed_batch[key] = processed_batch[key].long()
+            
+            return processed_batch

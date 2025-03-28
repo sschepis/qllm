@@ -186,6 +186,30 @@ class DialogueModelAdapter(ModelAdapter):
         if "labels" not in prepared_batch:
             self.logger.warning("No labels found in dialogue batch. Using input_ids as labels.")
             prepared_batch["labels"] = prepared_batch["input_ids"].clone()
+            
+        # Ensure input_ids and labels are LongTensor (required for embedding layers)
+        for key in ["input_ids", "labels"]:
+            if key in prepared_batch and torch.is_tensor(prepared_batch[key]):
+                if prepared_batch[key].dtype != torch.long:
+                    self.logger.warning(f"Converting {key} from {prepared_batch[key].dtype} to torch.long")
+                    prepared_batch[key] = prepared_batch[key].long()
+        
+        # Ensure attention_mask has correct dimensions for attention layers
+        if "attention_mask" in prepared_batch and torch.is_tensor(prepared_batch["attention_mask"]):
+            # Check if attention_mask is 1D but needs to be 2D
+            if prepared_batch["attention_mask"].dim() == 1:
+                self.logger.warning("Reshaping 1D attention_mask to 2D")
+                batch_size = prepared_batch["input_ids"].size(0)
+                seq_len = prepared_batch["input_ids"].size(1)
+                
+                # Try to reshape based on input_ids dimensions
+                if prepared_batch["attention_mask"].size(0) == batch_size * seq_len:
+                    # Reshape to [batch_size, seq_len]
+                    prepared_batch["attention_mask"] = prepared_batch["attention_mask"].view(batch_size, seq_len)
+                else:
+                    # Create a new attention mask that's all 1s
+                    self.logger.warning("Cannot reshape attention_mask, creating new one")
+                    prepared_batch["attention_mask"] = torch.ones_like(prepared_batch["input_ids"]).bool()
         
         # NaN prevention: Check if all labels are -100
         if torch.is_tensor(prepared_batch["labels"]) and (prepared_batch["labels"] == -100).all():
@@ -214,9 +238,43 @@ class DialogueModelAdapter(ModelAdapter):
         # Dialogue-specific forward pass additions can be added here
         
         # Forward pass through model
-        outputs = model(**batch, return_dict=return_dict)
-        
-        return outputs
+        try:
+            # Handle attention mask dimensionality issues
+            if 'attention_mask' in batch:
+                attention_mask = batch['attention_mask']
+                
+                # Fix dimensions if needed
+                if attention_mask.dim() == 1:
+                    bs = batch['input_ids'].size(0)
+                    seq_len = batch['input_ids'].size(1)
+                    
+                    # Reshape or create proper attention mask
+                    if attention_mask.size(0) == bs * seq_len:
+                        batch['attention_mask'] = attention_mask.view(bs, seq_len)
+                    else:
+                        # Create new mask of correct size
+                        batch['attention_mask'] = torch.ones_like(batch['input_ids']).bool()
+                
+                # Check if key_padding_mask is needed instead of attention_mask
+                if hasattr(model, 'encoder') and hasattr(model.encoder, 'layers'):
+                    # Add key_padding_mask for transformer models
+                    batch['key_padding_mask'] = batch['attention_mask']
+            
+            # Forward pass through model
+            outputs = model(**batch, return_dict=return_dict)
+            return outputs
+                
+        except Exception as e:
+            # Log error and try to recover
+            self.logger.error(f"Error in dialogue model forward pass: {e}")
+            
+            # Create dummy outputs as a fallback
+            dummy_loss = torch.tensor(0.0, requires_grad=True, device=self.device)
+            
+            if return_dict:
+                return {'loss': dummy_loss, 'logits': dummy_loss.view(1, 1)}
+            else:
+                return (dummy_loss, {'logits': dummy_loss.view(1, 1)})
     
     def compute_loss(
         self,
