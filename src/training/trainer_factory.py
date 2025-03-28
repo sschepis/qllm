@@ -117,11 +117,33 @@ def create_dataset_adapter(
     
     # Create the appropriate adapter
     if adapter_type == "dialogue":
+        # Determine max sequence length from various possible locations
+        max_seq_length = 512  # Default value
+        
+        if isinstance(config, EnhancedTrainingConfig) and hasattr(config, "dataset_adapter"):
+            # Try to get from dataset_adapter config
+            if hasattr(config.dataset_adapter, "model_adapter_kwargs") and "max_sequence_length" in config.dataset_adapter.model_adapter_kwargs:
+                max_seq_length = config.dataset_adapter.model_adapter_kwargs["max_sequence_length"]
+            elif hasattr(config.dataset_adapter, "max_sequence_length"):
+                max_seq_length = config.dataset_adapter.max_sequence_length
+            elif hasattr(config.dataset_adapter, "max_seq_length"):
+                max_seq_length = config.dataset_adapter.max_seq_length
+        
+        # Try model_adapter config as well
+        if isinstance(config, EnhancedTrainingConfig) and hasattr(config, "model_adapter"):
+            if hasattr(config.model_adapter, "max_sequence_length") and max_seq_length == 512:
+                max_seq_length = config.model_adapter.max_sequence_length
+        
+        # Try top-level config
+        if hasattr(config, "max_sequence_length") and max_seq_length == 512:
+            max_seq_length = config.max_sequence_length
+        elif hasattr(config, "max_seq_length") and max_seq_length == 512:
+            max_seq_length = config.max_seq_length
+            
         return DialogueDatasetAdapter(
             config=config,
             tokenizer=tokenizer,
-            max_seq_length=config.dataset_adapter.model_adapter_kwargs.get("max_sequence_length", 512) 
-                if hasattr(config, "dataset_adapter") else 512
+            max_seq_length=max_seq_length
         )
     elif adapter_type == "multimodal":
         return MultimodalDatasetAdapter(
