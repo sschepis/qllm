@@ -397,9 +397,19 @@ class TrainerCore:
             
             return results
     
+    def train_epoch(self) -> Dict[str, float]:
+        """
+        Public interface to train the model for one epoch.
+        This method is called by menu_handlers.py.
+        
+        Returns:
+            Dictionary of training metrics for the epoch
+        """
+        return self._train_epoch()
+    
     def _train_epoch(self) -> Dict[str, float]:
         """
-        Train the model for one epoch.
+        Internal implementation to train the model for one epoch.
         
         Returns:
             Dictionary of training metrics for the epoch
