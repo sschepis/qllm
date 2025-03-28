@@ -1,7 +1,7 @@
 """
 Factory functions for the enhanced training system.
 
-This module provides factory functions for creating trainers and related
+This module provides factory functions and factory class for creating trainers and related
 components with the appropriate configuration and dependencies.
 """
 
@@ -13,6 +13,8 @@ import torch
 import torch.nn as nn
 
 from src.training.trainer_core import TrainerCore
+from src.training.unified_trainer import UnifiedTrainer
+from src.training.enhanced_trainer import EnhancedTrainer
 from src.training.model_adapters.base_adapter import ModelAdapter
 from src.training.model_adapters.standard_adapter import StandardModelAdapter
 from src.training.model_adapters.dialogue_adapter import DialogueModelAdapter
@@ -434,6 +436,184 @@ def create_trainer_from_config(
         config=config,
         model_config=model_config
     )
+
+
+# Factory class for creating trainers
+class TrainerFactory:
+    """
+    Factory class for creating and configuring trainer instances.
+    
+    This class provides static methods for creating different types of trainers
+    with appropriate configurations and components.
+    """
+    
+    @staticmethod
+    def create_trainer(
+        model: Optional[nn.Module] = None,
+        config: Optional[Union[EnhancedTrainingConfig, TrainingConfig, Dict[str, Any]]] = None,
+        model_config: Optional[ModelConfig] = None,
+        **kwargs
+    ) -> TrainerCore:
+        """
+        Create a trainer instance with the given model and configuration.
+        
+        Args:
+            model: Model to train
+            config: Training configuration
+            model_config: Model configuration
+            **kwargs: Additional arguments
+            
+        Returns:
+            Configured trainer instance
+        """
+        return create_trainer(
+            model=model,
+            config=config,
+            model_config=model_config,
+            **kwargs
+        )
+    
+    @staticmethod
+    def get_trainer(
+        trainer_type: str,
+        config: Union[EnhancedTrainingConfig, TrainingConfig],
+        model: Optional[nn.Module] = None,
+        model_config: Optional[ModelConfig] = None
+    ) -> Union[TrainerCore, UnifiedTrainer, EnhancedTrainer]:
+        """
+        Get a trainer instance by type.
+        
+        Args:
+            trainer_type: Type of trainer
+            config: Training configuration
+            model: Model to train
+            model_config: Model configuration
+            
+        Returns:
+            Configured trainer instance
+        """
+        trainer_type = trainer_type.lower()
+        
+        if trainer_type == "unified":
+            return TrainerFactory.create_unified_trainer(config, model)
+        elif trainer_type == "enhanced":
+            return EnhancedTrainer(config, model)
+        else:
+            return get_trainer_from_name(trainer_type, config, model, model_config)
+    
+    @staticmethod
+    def create_trainer_for_model_type(
+        model_type: str,
+        config: Union[EnhancedTrainingConfig, TrainingConfig],
+        model: Optional[nn.Module] = None,
+        model_config: Optional[ModelConfig] = None
+    ) -> TrainerCore:
+        """
+        Create a trainer specialized for a specific model type.
+        
+        Args:
+            model_type: Type of model (standard, dialogue, multimodal)
+            config: Training configuration
+            model: Model to train
+            model_config: Model configuration
+            
+        Returns:
+            Configured trainer instance
+        """
+        # Configure the adapters based on model type
+        if isinstance(config, EnhancedTrainingConfig):
+            if model_type == "dialogue":
+                config.model_adapter.adapter_type = "dialogue"
+                config.dataset_adapter.adapter_type = "dialogue"
+            elif model_type == "multimodal":
+                config.model_adapter.adapter_type = "multimodal"
+                config.dataset_adapter.adapter_type = "multimodal"
+            else:
+                config.model_adapter.adapter_type = "standard"
+                config.dataset_adapter.adapter_type = "standard"
+        
+        return create_trainer(
+            model=model,
+            config=config,
+            model_config=model_config
+        )
+    
+    @staticmethod
+    def create_unified_trainer(
+        config: Union[EnhancedTrainingConfig, TrainingConfig],
+        model: Optional[nn.Module] = None
+    ) -> UnifiedTrainer:
+        """
+        Create a unified trainer instance.
+        
+        Args:
+            config: Training configuration
+            model: Model to train
+            
+        Returns:
+            UnifiedTrainer instance
+        """
+        return UnifiedTrainer(config, model)
+
+
+# Helper functions that can be used directly
+def get_trainer(
+    trainer_type: str,
+    config: Union[EnhancedTrainingConfig, TrainingConfig],
+    model: Optional[nn.Module] = None,
+    model_config: Optional[ModelConfig] = None
+) -> Union[TrainerCore, UnifiedTrainer, EnhancedTrainer]:
+    """
+    Get a trainer instance by type.
+    
+    Args:
+        trainer_type: Type of trainer
+        config: Training configuration
+        model: Model to train
+        model_config: Model configuration
+        
+    Returns:
+        Configured trainer instance
+    """
+    return TrainerFactory.get_trainer(trainer_type, config, model, model_config)
+
+
+def create_trainer_for_model_type(
+    model_type: str,
+    config: Union[EnhancedTrainingConfig, TrainingConfig],
+    model: Optional[nn.Module] = None,
+    model_config: Optional[ModelConfig] = None
+) -> TrainerCore:
+    """
+    Create a trainer specialized for a specific model type.
+    
+    Args:
+        model_type: Type of model (standard, dialogue, multimodal)
+        config: Training configuration
+        model: Model to train
+        model_config: Model configuration
+        
+    Returns:
+        Configured trainer instance
+    """
+    return TrainerFactory.create_trainer_for_model_type(model_type, config, model, model_config)
+
+
+def create_unified_trainer(
+    config: Union[EnhancedTrainingConfig, TrainingConfig],
+    model: Optional[nn.Module] = None
+) -> UnifiedTrainer:
+    """
+    Create a unified trainer instance.
+    
+    Args:
+        config: Training configuration
+        model: Model to train
+        
+    Returns:
+        UnifiedTrainer instance
+    """
+    return TrainerFactory.create_unified_trainer(config, model)
 
 
 def get_trainer_from_name(
