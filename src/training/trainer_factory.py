@@ -6,6 +6,7 @@ based on configuration, simplifying the trainer initialization process.
 """
 
 import logging
+import warnings
 from typing import Dict, Any, Optional, List, Union, Type
 
 import torch
@@ -14,15 +15,59 @@ from src.config.model_config import ModelConfig
 from src.config.training_config import TrainingConfig
 from src.config.data_config import DataConfig
 
+# Import all trainers - legacy and unified
 from src.training.base_trainer import BaseTrainer
 from src.training.enhanced_trainer import EnhancedTrainer
 from src.training.standard_trainer import StandardTrainer
 from src.training.dialogue_trainer import DialogueTrainer
+from src.training.unified_trainer import UnifiedTrainer
+
+# Import components for trainer composition
 from src.training.model_adapters import get_model_adapter, ModelAdapter
 from src.training.strategies import get_training_strategy, TrainingStrategy
 from src.training.extensions import ExtensionManager
 from src.training.checkpoints import CheckpointManager
 from src.training.metrics import MetricsLogger
+
+
+class TrainerFactory:
+    """Factory class for creating trainers of different types."""
+    
+    def __init__(self):
+        """Initialize the trainer factory."""
+        self.logger = logging.getLogger("quantum_resonance")
+    
+    def create_trainer(
+        self,
+        model_config: ModelConfig,
+        training_config: TrainingConfig,
+        data_config: DataConfig,
+        output_dir: Optional[str] = None,
+        logger: Optional[logging.Logger] = None,
+    ) -> UnifiedTrainer:
+        """
+        Create a trainer instance based on configuration.
+        
+        Args:
+            model_config: Model configuration
+            training_config: Training configuration
+            data_config: Data configuration
+            output_dir: Directory for outputs
+            logger: Logger instance
+            
+        Returns:
+            Initialized trainer instance
+        """
+        # Use the module-level function
+        trainer_type = getattr(training_config, "trainer_type", "unified")
+        return get_trainer(
+            model_config=model_config,
+            training_config=training_config,
+            data_config=data_config,
+            output_dir=output_dir,
+            logger=logger or self.logger,
+            trainer_type=trainer_type
+        )
 
 
 def get_trainer(
@@ -32,7 +77,7 @@ def get_trainer(
     output_dir: Optional[str] = None,
     logger: Optional[logging.Logger] = None,
     trainer_type: Optional[str] = None
-) -> Union[BaseTrainer, EnhancedTrainer]:
+) -> Union[UnifiedTrainer, BaseTrainer, EnhancedTrainer]:
     """
     Create a trainer instance based on configuration.
     
@@ -52,7 +97,7 @@ def get_trainer(
     """
     # Determine trainer type from config if not provided
     if trainer_type is None:
-        trainer_type = getattr(training_config, "trainer_type", "enhanced")
+        trainer_type = getattr(training_config, "trainer_type", "unified")
     
     # Create logger if not provided
     if logger is None:
@@ -61,25 +106,136 @@ def get_trainer(
     # Create trainer based on type
     trainer_type = trainer_type.lower()
     
-    if trainer_type == "enhanced":
+    if trainer_type == "unified":
+        # Create unified trainer with appropriate components based on config
+        return create_unified_trainer(
+            model_config, training_config, data_config, output_dir, logger
+        )
+    elif trainer_type == "enhanced":
+        warnings.warn(
+            "The 'enhanced' trainer type is deprecated and will be removed in a future version. "
+            "Use 'unified' trainer type instead.",
+            DeprecationWarning, stacklevel=2
+        )
         return create_enhanced_trainer(
             model_config, training_config, data_config, output_dir, logger
         )
     elif trainer_type == "standard":
-        return StandardTrainer(
+        warnings.warn(
+            "The 'standard' trainer type is deprecated and will be removed in a future version. "
+            "Use 'unified' trainer type instead.",
+            DeprecationWarning, stacklevel=2
+        )
+        # Forward to unified trainer with standard settings
+        training_config.model_type = "standard"
+        return create_unified_trainer(
             model_config, training_config, data_config, output_dir, logger
         )
     elif trainer_type == "dialogue":
-        return DialogueTrainer(
+        warnings.warn(
+            "The 'dialogue' trainer type is deprecated and will be removed in a future version. "
+            "Use 'unified' trainer type with model_type='dialogue' instead.",
+            DeprecationWarning, stacklevel=2
+        )
+        # Forward to unified trainer with dialogue settings
+        training_config.model_type = "dialogue"
+        return create_unified_trainer(
             model_config, training_config, data_config, output_dir, logger
         )
     elif trainer_type == "base":
+        warnings.warn(
+            "The 'base' trainer type is deprecated and will be removed in a future version. "
+            "Use 'unified' trainer type instead.",
+            DeprecationWarning, stacklevel=2
+        )
+        # Direct instantiation for backward compatibility
         return BaseTrainer(
             model_config, training_config, data_config, output_dir, logger
         )
     else:
         raise ValueError(f"Unsupported trainer type: {trainer_type}")
 
+
+def create_unified_trainer(
+    model_config: ModelConfig,
+    training_config: TrainingConfig,
+    data_config: DataConfig,
+    output_dir: Optional[str] = None,
+    logger: Optional[logging.Logger] = None
+) -> UnifiedTrainer:
+    """
+    Create a unified trainer with all components.
+    
+    Args:
+        model_config: Model configuration
+        training_config: Training configuration
+        data_config: Data configuration
+        output_dir: Directory for outputs
+        logger: Logger instance
+        
+    Returns:
+        Initialized unified trainer
+    """
+    # Create logger if not provided
+    if logger is None:
+        logger = logging.getLogger("quantum_resonance")
+    
+    # Determine device
+    device = _get_device(training_config)
+    
+    # Create model adapter
+    model_type = getattr(training_config, "model_type", "standard")
+    model_adapter = get_model_adapter(
+        model_type,
+        model_config,
+        training_config,
+        device,
+        logger
+    )
+    
+    # Create training strategy
+    strategy_type = getattr(training_config, "training_strategy", "standard")
+    training_strategy = get_training_strategy(
+        strategy_type,
+        training_config,
+        logger
+    )
+    
+    # Create extension manager
+    extension_manager = ExtensionManager(
+        training_config,
+        logger
+    )
+    
+    # Create checkpoint manager
+    checkpoint_manager = CheckpointManager(
+        training_config,
+        output_dir,
+        logger
+    )
+    
+    # Create metrics logger
+    metrics_logger = MetricsLogger(
+        output_dir or getattr(training_config, "output_dir", "runs/quantum_resonance"),
+        log_to_console=True,
+        log_to_tensorboard=getattr(training_config, "use_tensorboard", True),
+        log_to_file=True,
+        logger=logger
+    )
+    
+    # Create unified trainer
+    return UnifiedTrainer(
+        model_config=model_config,
+        training_config=training_config,
+        data_config=data_config,
+        output_dir=output_dir,
+        logger=logger,
+        model_adapter=model_adapter,
+        training_strategy=training_strategy,
+        extension_manager=extension_manager,
+        checkpoint_manager=checkpoint_manager,
+        metrics_logger=metrics_logger
+    )
 
 def create_enhanced_trainer(
     model_config: ModelConfig,

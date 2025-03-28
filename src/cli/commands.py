@@ -15,8 +15,9 @@ from src.utils.logging import setup_logger, get_default_logger
 from src.utils.device import get_device, print_device_info
 from src.model.semantic_resonance_model import SemanticResonanceModel
 from src.data.dataloaders import get_tokenizer, get_wikitext_dataloaders
-from src.training.trainer import Trainer
 from src.training.checkpoint import load_checkpoint, find_latest_checkpoint
+from src.training import TrainerFactory, get_trainer
+from src.training.model_adapters import StandardModelAdapter
 
 # Get logger
 logger = logging.getLogger("quantum_resonance")
@@ -28,7 +29,8 @@ def setup_environment(
     model_args: Dict[str, Any] = None,
     training_args: Dict[str, Any] = None,
     data_args: Dict[str, Any] = None,
-    log_level: str = "info"
+    log_level: str = "info",
+    trainer_type: str = "enhanced"
 ) -> Tuple[Dict[str, Any], str]:
     """
     Set up the environment for commands.
@@ -98,6 +100,9 @@ def setup_environment(
     # Set output directory in training config
     configs["training"].output_dir = output_dir
     
+    # Set trainer type in training config
+    setattr(configs["training"], "trainer_type", trainer_type)
+    
     # Save updated configurations
     save_configs(configs, output_dir)
     
@@ -129,6 +134,7 @@ def train_command(args: Dict[str, Any]) -> int:
     checkpoint_path = args.get("checkpoint_path")
     ignore_checkpoints = args.get("ignore_checkpoints", False)
     log_level = args.get("log_level", "info")
+    trainer_type = args.get("trainer_type", "enhanced")
     
     # Extract model/training/data args
     from src.cli.arg_parsing import extract_config_args
@@ -141,7 +147,8 @@ def train_command(args: Dict[str, Any]) -> int:
         model_args=model_args,
         training_args=training_args,
         data_args=data_args,
-        log_level=log_level
+        log_level=log_level,
+        trainer_type=trainer_type
     )
     
     # Get configurations
@@ -188,30 +195,34 @@ def train_command(args: Dict[str, Any]) -> int:
         model = SemanticResonanceModel(model_config)
         model.to(device)
     
-    # Initialize trainer
-    trainer = Trainer(
-        model=model,
-        train_dataloader=dataloaders["train"],
-        val_dataloader=dataloaders["validation"],
-        test_dataloader=dataloaders["test"],
-        device=device,
+    # Initialize trainer using factory
+    trainer_factory = TrainerFactory()
+    
+    # Determine trainer type from config
+    trainer_type = getattr(training_config, "trainer_type", "enhanced")
+    logger.info(f"Creating {trainer_type} trainer")
+    
+    # Create trainer
+    trainer = trainer_factory.create_trainer(
+        model_config=model_config,
+        training_config=training_config,
+        data_config=data_config,
         output_dir=output_dir,
-        max_epochs=training_config.max_epochs,
-        learning_rate=training_config.learning_rate,
-        weight_decay=training_config.weight_decay,
-        warmup_steps=training_config.warmup_steps,
-        gradient_accumulation_steps=training_config.gradient_accumulation_steps,
-        max_grad_norm=training_config.max_grad_norm,
-        eval_steps=training_config.eval_steps,
-        save_steps=training_config.save_steps,
-        logging_steps=training_config.logging_steps,
-        save_total_limit=training_config.save_total_limit,
-        save_every_epoch=True,
-        use_amp=training_config.mixed_precision,
-        early_stopping_patience=training_config.early_stopping_patience,
-        early_stopping_threshold=training_config.early_stopping_threshold,
-        seed=training_config.seed
+        logger=logger
     )
+    
+    # Set model in the trainer
+    trainer.model = model
+    
+    # Initialize components
+    trainer.initialize_tokenizer()
+    trainer.tokenizer = tokenizer  # Ensure tokenizer is set
+    
+    # Set dataloaders
+    trainer.dataloaders = dataloaders
+    
+    # Initialize optimizer
+    trainer.initialize_optimizer()
     
     # Load checkpoint into trainer if specified
     if checkpoint_path and os.path.exists(checkpoint_path):
@@ -220,6 +231,34 @@ def train_command(args: Dict[str, Any]) -> int:
     
     # Train model
     logger.info("Starting training...")
+    
+    # With EnhancedTrainer we need to set the model first, then initialize other components
+    if hasattr(trainer, 'model_adapter'):
+        # For EnhancedTrainer, just set the model in the model adapter
+        if trainer.model_adapter is not None:
+            trainer.model_adapter.set_model(model)
+        else:
+            # Create a model adapter if needed
+            from src.training.model_adapters import StandardModelAdapter
+            # Ensure model_config has tokenizer info from data_config
+            model_config.extra_model_params['tokenizer_name'] = data_config.tokenizer_name
+            model_adapter = StandardModelAdapter(model_config, training_config)
+            model_adapter.set_model(model)
+            if hasattr(trainer, 'set_model_adapter'):
+                trainer.set_model_adapter(model_adapter)
+    else:
+        # For other trainers, just set the model directly
+        trainer.model = model
+    
+    # Initialize remaining components
+    if hasattr(trainer, 'initialize_tokenizer'):
+        trainer.tokenizer = tokenizer
+    
+    # Make sure dataloaders are set
+    if hasattr(trainer, 'dataloaders'):
+        trainer.dataloaders = dataloaders
+    
+    # Train
     train_stats = trainer.train()
     
     # Print training statistics
@@ -255,6 +294,7 @@ def evaluate_command(args: Dict[str, Any]) -> int:
     eval_split = args.get("eval_split", "validation")
     compute_full_metrics = args.get("compute_full_metrics", False)
     log_level = args.get("log_level", "info")
+    trainer_type = args.get("trainer_type", "enhanced")
     
     # Extract model/data args
     from src.cli.arg_parsing import extract_config_args
@@ -267,7 +307,8 @@ def evaluate_command(args: Dict[str, Any]) -> int:
         model_args=model_args,
         training_args=training_args,
         data_args=data_args,
-        log_level=log_level
+        log_level=log_level,
+        trainer_type=trainer_type
     )
     
     # Get configurations
@@ -316,17 +357,48 @@ def evaluate_command(args: Dict[str, Any]) -> int:
     # Evaluate model
     logger.info(f"Evaluating model on {eval_split} split...")
     
-    # Set up trainer for evaluation
-    trainer = Trainer(
-        model=model,
-        train_dataloader=None,
-        val_dataloader=dataloaders[eval_split],
-        device=device,
-        output_dir=output_dir
+    # Initialize trainer using factory
+    trainer_factory = TrainerFactory()
+    
+    # Determine trainer type from config
+    trainer_type = getattr(training_config, "trainer_type", "enhanced")
+    logger.info(f"Creating {trainer_type} trainer for evaluation")
+    
+    # Create trainer
+    trainer = trainer_factory.create_trainer(
+        model_config=model_config,
+        training_config=training_config,
+        data_config=data_config,
+        output_dir=output_dir,
+        logger=logger
     )
     
+    # Set model in the trainer
+    if hasattr(trainer, 'model_adapter'):
+        # For EnhancedTrainer, just set the model in the model adapter
+        if trainer.model_adapter is not None:
+            trainer.model_adapter.set_model(model)
+        else:
+            # Create a model adapter if needed
+            from src.training.model_adapters import StandardModelAdapter
+            # Ensure model_config has tokenizer info from data_config
+            model_config.extra_model_params['tokenizer_name'] = data_config.tokenizer_name
+            model_adapter = StandardModelAdapter(model_config, training_config)
+            model_adapter.set_model(model)
+            if hasattr(trainer, 'set_model_adapter'):
+                trainer.set_model_adapter(model_adapter)
+    else:
+        # For other trainers, just set the model directly
+        trainer.model = model
+    
+    # Set tokenizer
+    trainer.tokenizer = tokenizer
+    
+    # Set dataloaders for evaluation
+    trainer.dataloaders = {eval_split: dataloaders[eval_split]}
+    
     # Evaluate
-    metrics = trainer._evaluate(dataloaders[eval_split], eval_split)
+    metrics = trainer.evaluate(eval_split)
     
     # Print metrics
     logger.info("\nEvaluation results:")

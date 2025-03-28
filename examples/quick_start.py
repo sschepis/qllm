@@ -153,10 +153,10 @@ def quick_start_demo(resume_checkpoint=None):
     
     # Create training configuration
     training_config = TrainingConfig(
-        batch_size=32,      # Small batch size
+        batch_size=8,      # Small batch size
         learning_rate=5e-4,  # Slightly higher for quick convergence
         weight_decay=0.01,
-        max_epochs=2,      # Multiple epochs for better training
+        max_epochs=1,      # Multiple epochs for better training
         warmup_steps=10,
         accumulation_steps=1,
         save_steps=50,      # Save every 50 steps
@@ -178,7 +178,7 @@ def quick_start_demo(resume_checkpoint=None):
     
     # Load a small subset of WikiText
     print("Loading data...")
-    dataset = load_dataset("wikitext", "wikitext-103-raw-v1", split="train[:50000]")
+    dataset = load_dataset("wikitext", "wikitext-103-raw-v1", split="train[:10000]")
     
     # Prepare dataset
     def tokenize_function(examples):
@@ -213,6 +213,98 @@ def quick_start_demo(resume_checkpoint=None):
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model size: {total_params:,} parameters ({trainable_params:,} trainable)")
     
+    # Add generate method to model if it doesn't exist already
+    if not hasattr(model, 'generate'):
+        print("Adding generate method to model...")
+        
+        def generate(
+            self,
+            input_ids,
+            max_length=50,
+            temperature=1.0,
+            do_sample=True,
+            top_k=0,
+            top_p=1.0,
+            repetition_penalty=1.0,
+            num_return_sequences=1,
+            pad_token_id=None,
+            **kwargs  # Accept additional parameters for compatibility
+        ):
+            """Generate text based on input_ids."""
+            device = input_ids.device
+            batch_size = input_ids.shape[0]
+            
+            # Initialize generated sequences with input_ids
+            generated = input_ids.clone()
+            
+            # Create attention mask
+            attention_mask = torch.ones_like(generated, device=device)
+            
+            # Continue generating until we reach max_length
+            with torch.no_grad():
+                for _ in range(max_length - generated.shape[1]):
+                    # Get model outputs
+                    outputs = self.forward(
+                        input_ids=generated,
+                        attention_mask=attention_mask,
+                        return_dict=True
+                    )
+                    
+                    # Get logits for next token (last token in sequence)
+                    next_token_logits = outputs["logits"][:, -1, :]
+                    
+                    # Apply temperature
+                    if temperature > 0:
+                        next_token_logits = next_token_logits / temperature
+                    
+                    # Apply top-k filtering
+                    if top_k > 0:
+                        top_k_values, top_k_indices = torch.topk(next_token_logits, top_k, dim=-1)
+                        filter_mask = torch.zeros_like(next_token_logits, device=device)
+                        filter_mask.scatter_(1, top_k_indices, 1.0)
+                        next_token_logits = torch.where(
+                            filter_mask > 0,
+                            next_token_logits,
+                            torch.full_like(next_token_logits, float('-inf'))
+                        )
+                    
+                    # Apply top-p (nucleus) filtering
+                    if top_p < 1.0:
+                        sorted_logits, sorted_indices = torch.sort(next_token_logits, descending=True)
+                        sorted_probs = torch.softmax(sorted_logits, dim=-1)
+                        cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+                        sorted_indices_to_remove = cumulative_probs > top_p
+                        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                        sorted_indices_to_remove[..., 0] = 0
+                        indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                        next_token_logits = torch.where(
+                            indices_to_remove,
+                            torch.full_like(next_token_logits, float('-inf')),
+                            next_token_logits
+                        )
+                    
+                    # Sample from the filtered distribution
+                    if do_sample:
+                        probs = torch.softmax(next_token_logits, dim=-1)
+                        next_tokens = torch.multinomial(probs, num_samples=1)
+                    else:
+                        next_tokens = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+                    
+                    # Append the new token to the sequence
+                    generated = torch.cat([generated, next_tokens], dim=1)
+                    
+                    # Update attention mask
+                    attention_mask = torch.cat([
+                        attention_mask,
+                        torch.ones((batch_size, 1), device=device)
+                    ], dim=1)
+                    
+            return generated
+        
+        # Add the method to the model instance
+        import types
+        model.generate = types.MethodType(generate, model)
+    
     # Create optimizer
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -225,19 +317,40 @@ def quick_start_demo(resume_checkpoint=None):
     global_step = 0
     best_loss = float('inf')
     
-    # Load checkpoint if specified
-    if resume_checkpoint:
+    # Load checkpoint if specified or find the latest one
+    checkpoint_to_load = resume_checkpoint
+    
+    # If no checkpoint specified, try to find the latest one
+    if not checkpoint_to_load:
+        # Look for checkpoints in the output directory
+        checkpoint_files = []
+        if os.path.exists(output_dir):
+            for filename in os.listdir(output_dir):
+                if filename.startswith('checkpoint_') and filename.endswith('.pt'):
+                    checkpoint_path = os.path.join(output_dir, filename)
+                    checkpoint_files.append(checkpoint_path)
+        
+        if checkpoint_files:
+            # Sort by modification time (newest first)
+            checkpoint_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+            checkpoint_to_load = checkpoint_files[0]
+            print(f"Found latest checkpoint: {os.path.basename(checkpoint_to_load)}")
+    
+    # Load the checkpoint if available
+    if checkpoint_to_load:
         start_epoch, global_step, loaded_model_config, loaded_training_config, last_loss = \
-            load_training_checkpoint(resume_checkpoint, model, optimizer, device)
+            load_training_checkpoint(checkpoint_to_load, model, optimizer, device)
         
         print(f"Resuming from epoch {start_epoch+1}, step {global_step}")
 
-        # Optionally update configs with loaded values
+        # Update configs with loaded values
         model_config = ModelConfig(**loaded_model_config)
         training_config = TrainingConfig(**loaded_training_config)
         
         # Start from the next epoch
         start_epoch += 1
+    else:
+        print("No checkpoints found. Starting training from scratch.")
         
     # Train for multiple epochs
     print(f"Training for {training_config.max_epochs} epochs starting from epoch {start_epoch+1}...")

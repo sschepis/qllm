@@ -16,6 +16,7 @@ class TrainingConfig:
     # Basic training parameters
     batch_size: int = 16
     eval_batch_size: int = 16  # Added this to fix the error
+    num_workers: int = 4  # Number of workers for data loading
     learning_rate: float = 5e-5
     weight_decay: float = 0.01
     max_epochs: int = 3
@@ -23,6 +24,9 @@ class TrainingConfig:
     # Training modes and types
     training_type: str = "standard"  # standard, dialogue, verbose
     learning_mode: str = "adaptive"  # adaptive, scheduled, feedback_driven
+    trainer_type: str = "unified"    # unified (recommended), enhanced, standard, dialogue, base
+    model_type: str = "standard"     # standard, dialogue, multimodal
+    training_strategy: str = "standard"  # standard, finetune
     
     # Device and precision
     device: Optional[str] = None  # cuda, cpu, mps, auto
@@ -36,6 +40,7 @@ class TrainingConfig:
     # Scheduler settings
     lr_scheduler: str = "cosine"
     warmup_steps: int = 0
+    warmup_ratio: float = 0.1  # Proportion of training steps to use for warmup
     
     # Logging and checkpointing
     logging_steps: int = 10

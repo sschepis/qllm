@@ -124,6 +124,11 @@ def add_training_arguments(parser: argparse.ArgumentParser) -> None:
     train_group.add_argument("--max_grad_norm", type=float, default=1.0,
                             help="Gradient clipping norm")
     
+    # Trainer selection
+    train_group.add_argument("--trainer_type", type=str, default="enhanced",
+                            choices=["standard", "dialogue", "enhanced", "base"],
+                            help="Type of trainer to use")
+    
     # Training schedule
     train_group.add_argument("--gradient_accumulation_steps", type=int, default=1,
                             help="Number of steps to accumulate gradients")
@@ -363,7 +368,7 @@ def extract_config_args(args: argparse.Namespace) -> Tuple[Dict[str, Any], Dict[
         "weight_decay", "warmup_steps", "max_grad_norm", "gradient_accumulation_steps",
         "eval_steps", "save_steps", "mixed_precision", "save_total_limit",
         "disable_optimizer_saving", "save_every_epoch", "early_stopping_patience",
-        "early_stopping_threshold", "output_dir", "device"
+        "early_stopping_threshold", "output_dir", "device", "trainer_type"
     }
     
     data_arg_names = {

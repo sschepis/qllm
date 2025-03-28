@@ -140,6 +140,17 @@ class ModelAdapter(ABC):
             self.model = self.create_model()
             self.model.to(self.device)
         return self.model
+        
+    def set_model(self, model: nn.Module) -> None:
+        """
+        Set the model instance.
+        
+        Args:
+            model: Model instance to use
+        """
+        self.model = model
+        if self.model is not None and self.device is not None:
+            self.model.to(self.device)
     
     def get_tokenizer(self) -> Any:
         """
@@ -151,6 +162,15 @@ class ModelAdapter(ABC):
         if self.tokenizer is None:
             self.tokenizer = self.create_tokenizer()
         return self.tokenizer
+    
+    def set_tokenizer(self, tokenizer: Any) -> None:
+        """
+        Set the tokenizer instance.
+        
+        Args:
+            tokenizer: Tokenizer instance to use
+        """
+        self.tokenizer = tokenizer
     
     def resize_token_embeddings(self, model: nn.Module, tokenizer: Any) -> nn.Module:
         """

@@ -83,3 +83,40 @@ def load_from_cache(cache_path: str) -> Optional[Any]:
             except Exception:
                 pass
         return None
+        
+def create_dataloaders(
+    data_config: Any,
+    tokenizer: Any,
+    batch_size: int = 16,
+    num_workers: int = 4
+) -> Dict[str, Any]:
+    """
+    Create dataloaders based on data config.
+    
+    This is a compatibility function for the enhanced trainer system.
+    
+    Args:
+        data_config: Data configuration
+        tokenizer: Tokenizer to use
+        batch_size: Batch size for training
+        num_workers: Number of workers for data loading
+        
+    Returns:
+        Dictionary of data loaders
+    """
+    # Import here to avoid circular imports
+    from src.data.dataloaders import get_appropriate_dataloaders
+    
+    # Get eval batch size if available
+    eval_batch_size = getattr(data_config, "eval_batch_size", batch_size)
+    if eval_batch_size is None:
+        eval_batch_size = batch_size
+        
+    # Call the existing function
+    return get_appropriate_dataloaders(
+        data_config=data_config,
+        tokenizer=tokenizer,
+        batch_size=batch_size,
+        eval_batch_size=eval_batch_size,
+        num_workers=num_workers
+    )

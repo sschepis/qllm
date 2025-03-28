@@ -76,10 +76,23 @@ class StandardModelAdapter(ModelAdapter):
         Returns:
             Initialized tokenizer
         """
-        self.logger.info(f"Loading tokenizer: {self.model_config.tokenizer_name}")
+        # Get tokenizer name from model_config extras or use default
+        tokenizer_name = "gpt2"  # Default tokenizer
+        
+        # Check if tokenizer_name is in model_config.extra_model_params
+        if hasattr(self.model_config, 'extra_model_params') and 'tokenizer_name' in self.model_config.extra_model_params:
+            tokenizer_name = self.model_config.extra_model_params['tokenizer_name']
+        # For backward compatibility
+        elif hasattr(self.model_config, 'tokenizer_name'):
+            tokenizer_name = self.model_config.tokenizer_name
+        # If training_config has data_config attribute
+        elif hasattr(self.training_config, 'data_config') and hasattr(self.training_config.data_config, 'tokenizer_name'):
+            tokenizer_name = self.training_config.data_config.tokenizer_name
+            
+        self.logger.info(f"Loading tokenizer: {tokenizer_name}")
         
         # Load tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(self.model_config.tokenizer_name)
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         
         # Set default pad token if not set
         if not tokenizer.pad_token:

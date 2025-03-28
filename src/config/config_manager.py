@@ -186,3 +186,45 @@ class ConfigManager:
             List of error messages, empty if validation passes
         """
         return self.schema.validate(config)
+        
+    def model_config_to_dict(self, config: ModelConfig) -> Dict[str, Any]:
+        """
+        Convert a ModelConfig object to a dictionary.
+        
+        Args:
+            config: ModelConfig object
+            
+        Returns:
+            Dictionary representation of the config
+        """
+        if hasattr(config, "to_dict"):
+            return config.to_dict()
+        return vars(config)
+        
+    def training_config_to_dict(self, config: TrainingConfig) -> Dict[str, Any]:
+        """
+        Convert a TrainingConfig object to a dictionary.
+        
+        Args:
+            config: TrainingConfig object
+            
+        Returns:
+            Dictionary representation of the config
+        """
+        if hasattr(config, "to_dict"):
+            return config.to_dict()
+        return vars(config)
+        
+    def data_config_to_dict(self, config: DataConfig) -> Dict[str, Any]:
+        """
+        Convert a DataConfig object to a dictionary.
+        
+        Args:
+            config: DataConfig object
+            
+        Returns:
+            Dictionary representation of the config
+        """
+        if hasattr(config, "to_dict"):
+            return config.to_dict()
+        return vars(config)

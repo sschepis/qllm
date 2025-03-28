@@ -256,7 +256,9 @@ class SemanticResonanceModel(nn.Module):
         top_k: int = 0,
         top_p: float = 1.0,
         repetition_penalty: float = 1.0,
-        num_return_sequences: int = 1
+        num_return_sequences: int = 1,
+        pad_token_id: Optional[int] = None,
+        **kwargs  # Accept additional parameters for compatibility
     ) -> torch.Tensor:
         """
         Generate text based on input_ids.
@@ -270,6 +272,8 @@ class SemanticResonanceModel(nn.Module):
             top_p: Top-p (nucleus) sampling parameter
             repetition_penalty: Penalty for repeating tokens
             num_return_sequences: Number of sequences to return
+            pad_token_id: Token ID to use for padding
+            **kwargs: Additional parameters for future compatibility
             
         Returns:
             Generated token ids
@@ -350,6 +354,21 @@ class SemanticResonanceModel(nn.Module):
                 else:
                     # Take the token with the highest probability
                     next_tokens = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+                
+                # Check for EOS token if pad_token_id is provided
+                if pad_token_id is not None and (next_tokens == pad_token_id).any():
+                    # For tokens that are EOS, replace with pad_token_id
+                    # This allows us to keep generating but recognize which sequences are done
+                    is_eos = next_tokens == pad_token_id
+                    next_tokens = torch.where(
+                        is_eos,
+                        torch.full_like(next_tokens, pad_token_id),
+                        next_tokens
+                    )
+                    
+                    # If all sequences have generated EOS, we can stop
+                    if (next_tokens == pad_token_id).all():
+                        break
                 
                 # Append the new token to the sequence
                 generated = torch.cat([generated, next_tokens], dim=1)

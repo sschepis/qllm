@@ -375,7 +375,7 @@ class MenuHandler:
             config_classes = self.config_manager.to_config_classes(self.current_config)
             
             # Import TrainerFactory here to avoid circular imports
-            from src.training.trainer_factory import TrainerFactory
+            from src.training import TrainerFactory
             
             # Create appropriate trainer
             trainer_factory = TrainerFactory()
@@ -413,6 +413,14 @@ class MenuHandler:
             try:
                 # Create the trainer instance
                 self._set_progress_message("Creating trainer")
+                
+                # Ensure tokenizer information is available to model_config
+                # This fixes issues with the enhanced trainer
+                if not hasattr(config_classes["model"], "tokenizer_name"):
+                    if not hasattr(config_classes["model"], "extra_model_params"):
+                        config_classes["model"].extra_model_params = {}
+                    config_classes["model"].extra_model_params["tokenizer_name"] = config_classes["data"].tokenizer_name
+                
                 trainer = trainer_factory.create_trainer(
                     model_config=config_classes["model"],
                     training_config=config_classes["training"],
@@ -708,7 +716,7 @@ class MenuHandler:
             config_classes = self.config_manager.to_config_classes(self.current_config)
             
             # Import TrainerFactory
-            from src.training.trainer_factory import TrainerFactory
+            from src.training import TrainerFactory
             
             # Create appropriate trainer
             trainer_factory = TrainerFactory()
