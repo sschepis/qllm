@@ -1013,10 +1013,43 @@ class TrainerCore:
             logger.info("Initializing dataloaders through dataset adapter")
             self.train_dataloader = self.dataset_adapter.get_train_dataloader()
             self.val_dataloader = self.dataset_adapter.get_val_dataloader()
+            
+            # For compatibility with menu_handlers.py
+            self._dataloaders = {
+                "train": self.train_dataloader,
+                "val": self.val_dataloader
+            }
         elif not self.dataset_adapter:
             logger.error("Cannot initialize dataloaders: dataset_adapter is None")
         else:
             logger.info("Dataloaders already initialized")
+            
+            # Ensure compatibility dict is set
+            if not hasattr(self, '_dataloaders'):
+                self._dataloaders = {
+                    "train": self.train_dataloader,
+                    "val": self.val_dataloader
+                }
+    
+    @property
+    def dataloaders(self) -> Dict[str, DataLoader]:
+        """
+        Property that provides dictionary access to dataloaders.
+        For compatibility with code that expects a dataloaders dictionary.
+        
+        Returns:
+            Dictionary mapping split names to dataloaders
+        """
+        if not hasattr(self, '_dataloaders'):
+            self._dataloaders = {}
+            
+            if hasattr(self, 'train_dataloader') and self.train_dataloader is not None:
+                self._dataloaders["train"] = self.train_dataloader
+                
+            if hasattr(self, 'val_dataloader') and self.val_dataloader is not None:
+                self._dataloaders["val"] = self.val_dataloader
+                
+        return self._dataloaders
     
     def initialize_optimizer(self) -> None:
         """
