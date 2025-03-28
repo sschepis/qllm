@@ -1053,6 +1053,18 @@ class TrainerCore:
         # Default fallback
         return os.path.join("runs", "quantum_resonance")
     
+    @property
+    def training_config(self):
+        """
+        Property that provides access to the training configuration.
+        This is an adapter for code that expects the config to be named 'training_config'
+        instead of just 'config'.
+        
+        Returns:
+            The training configuration
+        """
+        return self.config
+    
     def evaluate(self, dataloader: Optional[DataLoader] = None, split: str = "val") -> Dict[str, float]:
         """
         Evaluate the model on a dataset.
