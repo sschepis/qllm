@@ -269,7 +269,18 @@ class DialogueModelAdapter(ModelAdapter):
             
             # Forward pass through model
             outputs = model(**batch, return_dict=return_dict)
-            return outputs
+            
+            # DialogueModelAdapter.forward is expected to return (loss, outputs)
+            # not just the outputs
+            loss = None
+            if isinstance(outputs, dict) and 'loss' in outputs:
+                loss = outputs['loss']
+            
+            # Return the correct format - some code expects a tuple (loss, outputs)
+            if return_dict:
+                return outputs
+            else:
+                return loss, outputs
                 
         except Exception as e:
             # Log error and try to recover

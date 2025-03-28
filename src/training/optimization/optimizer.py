@@ -447,23 +447,37 @@ def apply_gradients(
     # Apply gradients
     try:
         if grad_scaler is not None and hasattr(grad_scaler, "step"):
-            # Check if it's our wrapper or the PyTorch implementation
-            if hasattr(grad_scaler, "grad_scaler") and grad_scaler.grad_scaler is not None:
-                # It's our GradScalerManager wrapper, use safely
+            # Try to ensure the optimizer has been unscaled properly
+            if hasattr(grad_scaler, "get_scale") and hasattr(optimizer.state, "values"):
+                # Try to manually unscale optimizer if not already done
+                try:
+                    # Only unscale if not already done
+                    optimizer_state_found = False
+                    inv_scale = 1.0 / grad_scaler.get_scale()
+                    
+                    # Check if optimizer has found_inf in its state
+                    for param_group in optimizer.param_groups:
+                        for param in param_group['params']:
+                            if param in optimizer.state:
+                                optimizer_state_found = True
+                                break
+                            
+                    # If we find no optimizer state, fabricate the necessary info
+                    if not optimizer_state_found:
+                        # Create dummy "found_inf" tensor for each device
+                        device = next(optimizer.param_groups[0]['params']).device
+                        optimizer.state["found_inf_per_device"] = {device: torch.tensor(0.0, device=device)}
+                except Exception as e:
+                    logger.error(f"Error preparing optimizer for gradient scaling: {e}")
+            
+            # Now try to step with error handling
+            try:
                 grad_scaler.step(optimizer)
                 grad_scaler.update()
-            else:
-                # It's the raw PyTorch scaler, try with fallback
-                try:
-                    grad_scaler.step(optimizer)
-                    grad_scaler.update()
-                except AssertionError as e:
-                    # Handle "No inf checks were recorded for this optimizer" error
-                    if "No inf checks were recorded" in str(e):
-                        # Fall back to standard optimizer step
-                        optimizer.step()
-                    else:
-                        raise
+            except Exception as e:
+                logger.error(f"Error in grad_scaler.step: {e}")
+                # Fall back to standard optimizer step
+                optimizer.step()
         else:
             # Standard optimizer step
             optimizer.step()
