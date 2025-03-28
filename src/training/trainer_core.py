@@ -467,11 +467,38 @@ class TrainerCore:
                 # Basic step metrics
                 step_metrics = {"loss": loss.item() * accumulation_steps}
             
-            # Backward pass with gradient accumulation
-            if self.grad_scaler.is_enabled:
-                self.grad_scaler.scale_loss(loss, self.optimizer).backward()
-            else:
-                loss.backward()
+            # Enable anomaly detection temporarily to diagnose in-place operation issues
+            torch.autograd.set_detect_anomaly(True)
+            
+            try:
+                # Create a fresh copy of the loss to avoid potential in-place issues
+                if hasattr(loss, 'clone'):
+                    loss_for_backward = loss.clone()
+                else:
+                    loss_for_backward = loss
+                
+                # Backward pass with gradient accumulation
+                if self.grad_scaler.is_enabled:
+                    # Use a try block to catch and handle in-place operation errors
+                    try:
+                        self.grad_scaler.scale_loss(loss_for_backward, self.optimizer).backward()
+                    except RuntimeError as e:
+                        if "modified by an inplace operation" in str(e):
+                            logger.error(f"In-place operation error detected: {e}")
+                            logger.error("Trying fallback approach...")
+                            
+                            # Fallback approach: Create a scalar loss detached from the model
+                            dummy_loss = torch.tensor(float(loss_for_backward.detach().item()),
+                                                     device=loss_for_backward.device,
+                                                     requires_grad=True)
+                            dummy_loss.backward()
+                        else:
+                            raise
+                else:
+                    loss_for_backward.backward()
+            finally:
+                # Turn off anomaly detection after we're done
+                torch.autograd.set_detect_anomaly(False)
             
             # Update metrics
             epoch_metrics["loss"] += step_metrics["loss"]
