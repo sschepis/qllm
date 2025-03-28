@@ -136,25 +136,25 @@ def quick_start_demo(resume_checkpoint=None):
     # Create a minimal model configuration
     model_config = ModelConfig(
         vocab_size=30000,  # Will be updated based on tokenizer
-        hidden_dim=256,    # Smaller than normal for quick testing
-        num_layers=2,      # Reduced layers for faster training
+        hidden_dim=768,    # Smaller than normal for quick testing
+        num_layers=8,      # Reduced layers for faster training
         num_heads=8,       # Adjusted to be divisible into sum of primes (7+11+13=31*8=248)
-        max_seq_length=128,  # Shorter sequences
+        max_seq_length=512,  # Shorter sequences
         dropout=0.1,
         primes=[8, 8, 8, 8, 8, 8, 8, 8],  # Make sure sum is divisible by num_heads
         base_dim=256,
-        max_iterations=5,  # Fewer iterations
+        max_iterations=10,  # Fewer iterations
         entropy_threshold=0.2,
         use_prime_mask=True,
         enable_hcw=True,
-        memory_size=100,   # Smaller memory
-        memory_key_dim=64  # Smaller key dimension
+        memory_size=250,   # Smaller memory
+        memory_key_dim=128  # Smaller key dimension
     )
     
     # Create training configuration
     training_config = TrainingConfig(
         batch_size=8,      # Small batch size
-        learning_rate=5e-4,  # Slightly higher for quick convergence
+        learning_rate=5e-5,  # Slightly higher for quick convergence
         weight_decay=0.01,
         max_epochs=3,      # Multiple epochs for better training
         warmup_steps=10,
