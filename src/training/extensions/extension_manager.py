@@ -469,6 +469,61 @@ class ExtensionManager:
         """
         return self.hooks.execute_hooks("post_load", model, path)
     
+    def run_hook(self, hook_name: str, **kwargs) -> Dict[str, Any]:
+        """
+        Run a hook with the given name and arguments.
+        This is a unified interface for running hooks that's compatible with
+        how the trainer core uses extensions.
+        
+        Args:
+            hook_name: Name of the hook to run
+            **kwargs: Arguments to pass to the hook
+            
+        Returns:
+            Dictionary mapping extension names to hook results
+        """
+        # Map hook names to their corresponding method or directly execute
+        hook_name = hook_name.replace("_", "")  # Normalize hook names
+        
+        # Map hook names to their direct method equivalents
+        hook_method_map = {
+            "beforetraining": "before_training",
+            "aftertraining": "after_training",
+            "beforeepoch": "before_epoch",
+            "afterepoch": "after_epoch",
+            "beforestep": "before_step",
+            "afterstep": "after_step",
+            "beforeforward": "pre_forward",
+            "afterforward": "post_forward",
+            "beforebackward": "pre_backward",
+            "afterbackward": "post_backward",
+            "beforeoptimizer": "pre_optimizer",
+            "afteroptimizer": "post_optimizer",
+            "beforebatch": "pre_batch",
+            "afterbatch": "post_batch",
+            "beforevalidation": "pre_validation",
+            "aftervalidation": "post_validation",
+            "beforesave": "pre_save",
+            "aftersave": "post_save",
+            "beforeload": "pre_load",
+            "afterload": "post_load"
+        }
+        
+        # Normalize the hook name for lookup
+        normalized_hook = hook_name.lower().replace("_", "")
+        
+        # Execute the hook through the hooks manager
+        try:
+            if normalized_hook in hook_method_map:
+                hook_method = hook_method_map[normalized_hook]
+                return self.hooks.execute_hooks(hook_method, **kwargs)
+            else:
+                self.logger.warning(f"Unknown hook name: {hook_name}, trying direct execution")
+                return self.hooks.execute_hooks(hook_name, **kwargs)
+        except Exception as e:
+            self.logger.error(f"Error executing hook {hook_name}: {e}")
+            return {}  # Return empty dict on error
+    
     def get_extension(self, name: str) -> Optional[BaseExtension]:
         """
         Get a specific extension by name.
