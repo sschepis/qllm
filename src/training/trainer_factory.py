@@ -1,378 +1,464 @@
 """
-Trainer factory for creating appropriate trainer instances.
+Factory functions for the enhanced training system.
 
-This module provides factory functions for creating trainer instances
-based on configuration, simplifying the trainer initialization process.
+This module provides factory functions for creating trainers and related
+components with the appropriate configuration and dependencies.
 """
 
+import os
 import logging
-import warnings
-from typing import Dict, Any, Optional, List, Union, Type
+from typing import Dict, List, Optional, Union, Any, Tuple, Type
 
 import torch
+import torch.nn as nn
 
-from src.config.model_config import ModelConfig
+from src.training.trainer_core import TrainerCore
+from src.training.model_adapters.base_adapter import ModelAdapter
+from src.training.model_adapters.standard_adapter import StandardModelAdapter
+from src.training.model_adapters.dialogue_adapter import DialogueModelAdapter
+from src.training.model_adapters.multimodal_adapter import MultimodalModelAdapter
+from src.training.dataset_adapters.base_adapter import DatasetAdapter
+from src.training.dataset_adapters.standard_adapter import StandardDatasetAdapter
+from src.training.dataset_adapters.dialogue_adapter import DialogueDatasetAdapter
+from src.training.dataset_adapters.multimodal_adapter import MultimodalDatasetAdapter
+from src.training.strategies.base_strategy import TrainingStrategy
+from src.training.strategies.standard_strategy import StandardTrainingStrategy
+from src.training.strategies.finetune_strategy import FinetuningStrategy
+from src.training.extensions.extension_manager import ExtensionManager
+from src.training.checkpoints.checkpoint_manager import CheckpointManager
+from src.training.metrics.metrics_logger import MetricsLogger
+from src.training.config.training_config import EnhancedTrainingConfig
 from src.config.training_config import TrainingConfig
-from src.config.data_config import DataConfig
-
-# Import all trainers - legacy and unified
-from src.training.base_trainer import BaseTrainer
-from src.training.enhanced_trainer import EnhancedTrainer
-from src.training.standard_trainer import StandardTrainer
-from src.training.dialogue_trainer import DialogueTrainer
-from src.training.unified_trainer import UnifiedTrainer
-
-# Import components for trainer composition
-from src.training.model_adapters import get_model_adapter, ModelAdapter
-from src.training.strategies import get_training_strategy, TrainingStrategy
-from src.training.extensions import ExtensionManager
-from src.training.checkpoints import CheckpointManager
-from src.training.metrics import MetricsLogger
+from src.config.model_config import ModelConfig
 
 
-class TrainerFactory:
-    """Factory class for creating trainers of different types."""
+# Get logger
+logger = logging.getLogger("quantum_resonance")
+
+
+def create_model_adapter(
+    config: Union[EnhancedTrainingConfig, Dict[str, Any]],
+    model_config: Optional[ModelConfig] = None,
+    device: Optional[torch.device] = None
+) -> ModelAdapter:
+    """
+    Create a model adapter based on configuration.
     
-    def __init__(self):
-        """Initialize the trainer factory."""
-        self.logger = logging.getLogger("quantum_resonance")
-    
-    def create_trainer(
-        self,
-        model_config: ModelConfig,
-        training_config: TrainingConfig,
-        data_config: DataConfig,
-        output_dir: Optional[str] = None,
-        logger: Optional[logging.Logger] = None,
-    ) -> UnifiedTrainer:
-        """
-        Create a trainer instance based on configuration.
+    Args:
+        config: Training configuration
+        model_config: Model configuration
+        device: Device to use
         
-        Args:
-            model_config: Model configuration
-            training_config: Training configuration
-            data_config: Data configuration
-            output_dir: Directory for outputs
-            logger: Logger instance
-            
-        Returns:
-            Initialized trainer instance
-        """
-        # Use the module-level function
-        trainer_type = getattr(training_config, "trainer_type", "unified")
-        return get_trainer(
+    Returns:
+        Initialized model adapter
+    """
+    # Determine adapter type
+    if isinstance(config, dict):
+        adapter_type = config.get("model_adapter", {}).get("adapter_type", "standard")
+        if adapter_type == "standard":
+            adapter_type = config.get("model_type", "standard")
+    elif isinstance(config, EnhancedTrainingConfig):
+        adapter_type = config.model_adapter.adapter_type
+    else:  # Handle legacy TrainingConfig
+        adapter_type = getattr(config, "model_type", "standard")
+    
+    adapter_type = adapter_type.lower()
+    
+    # Create the appropriate adapter
+    if adapter_type == "dialogue":
+        return DialogueModelAdapter(
             model_config=model_config,
-            training_config=training_config,
-            data_config=data_config,
-            output_dir=output_dir,
-            logger=logger or self.logger,
-            trainer_type=trainer_type
+            training_config=config,
+            device=device
+        )
+    elif adapter_type == "multimodal":
+        return MultimodalModelAdapter(
+            model_config=model_config,
+            training_config=config,
+            device=device
+        )
+    else:  # Default to standard
+        return StandardModelAdapter(
+            model_config=model_config,
+            training_config=config,
+            device=device
         )
 
 
-def get_trainer(
-    model_config: ModelConfig,
-    training_config: TrainingConfig,
-    data_config: DataConfig,
-    output_dir: Optional[str] = None,
-    logger: Optional[logging.Logger] = None,
-    trainer_type: Optional[str] = None
-) -> Union[UnifiedTrainer, BaseTrainer, EnhancedTrainer]:
+def create_dataset_adapter(
+    config: Union[EnhancedTrainingConfig, Dict[str, Any]],
+    tokenizer: Optional[Any] = None,
+    image_processor: Optional[Any] = None
+) -> DatasetAdapter:
     """
-    Create a trainer instance based on configuration.
+    Create a dataset adapter based on configuration.
     
     Args:
+        config: Training configuration
+        tokenizer: Tokenizer for text processing
+        image_processor: Image processor for multimodal data
+        
+    Returns:
+        Initialized dataset adapter
+    """
+    # Determine adapter type
+    if isinstance(config, dict):
+        adapter_type = config.get("dataset_adapter", {}).get("adapter_type", "standard")
+        if adapter_type == "standard":
+            adapter_type = config.get("model_type", "standard")
+    elif isinstance(config, EnhancedTrainingConfig):
+        adapter_type = config.dataset_adapter.adapter_type
+    else:  # Handle legacy TrainingConfig
+        adapter_type = getattr(config, "model_type", "standard")
+    
+    adapter_type = adapter_type.lower()
+    
+    # Create the appropriate adapter
+    if adapter_type == "dialogue":
+        return DialogueDatasetAdapter(
+            config=config,
+            tokenizer=tokenizer,
+            max_seq_length=config.dataset_adapter.model_adapter_kwargs.get("max_sequence_length", 512) 
+                if hasattr(config, "dataset_adapter") else 512
+        )
+    elif adapter_type == "multimodal":
+        return MultimodalDatasetAdapter(
+            config=config,
+            tokenizer=tokenizer,
+            image_processor=image_processor
+        )
+    else:  # Default to standard
+        return StandardDatasetAdapter(
+            config=config,
+            tokenizer=tokenizer
+        )
+
+
+def create_training_strategy(
+    config: Union[EnhancedTrainingConfig, Dict[str, Any]]
+) -> TrainingStrategy:
+    """
+    Create a training strategy based on configuration.
+    
+    Args:
+        config: Training configuration
+        
+    Returns:
+        Initialized training strategy
+    """
+    # Determine strategy type
+    if isinstance(config, dict):
+        strategy_type = config.get("training_strategy", {}).get("strategy_type", "standard")
+        if strategy_type == "standard":
+            strategy_type = config.get("training_strategy", "standard")
+    elif isinstance(config, EnhancedTrainingConfig):
+        strategy_type = config.training_strategy.strategy_type
+    else:  # Handle legacy TrainingConfig
+        strategy_type = getattr(config, "training_strategy", "standard")
+    
+    strategy_type = strategy_type.lower()
+    
+    # Create the appropriate strategy
+    if strategy_type == "finetune":
+        return FinetuningStrategy(config=config)
+    elif strategy_type == "pretrain":
+        # No pretrain strategy implemented yet, fall back to standard
+        logger.warning("Pretrain strategy requested but not implemented, falling back to standard")
+        return StandardTrainingStrategy(config=config)
+    else:  # Default to standard
+        return StandardTrainingStrategy(config=config)
+
+
+def create_extension_manager(
+    config: Union[EnhancedTrainingConfig, Dict[str, Any]]
+) -> Optional[ExtensionManager]:
+    """
+    Create an extension manager based on configuration.
+    
+    Args:
+        config: Training configuration
+        
+    Returns:
+        Initialized extension manager or None if no extensions are configured
+    """
+    # Check if extensions are configured
+    if isinstance(config, dict):
+        enabled_extensions = config.get("extensions", {}).get("enabled_extensions", [])
+        extension_configs = config.get("extensions", {}).get("extension_configs", {})
+    elif isinstance(config, EnhancedTrainingConfig):
+        enabled_extensions = config.extensions.enabled_extensions
+        extension_configs = config.extensions.extension_configs
+    else:  # Handle legacy TrainingConfig
+        extra_params = getattr(config, "extra_training_params", {})
+        enabled_extensions = extra_params.get("extensions", [])
+        extension_configs = extra_params.get("extension_configs", {})
+    
+    # Only create manager if extensions are enabled
+    if enabled_extensions:
+        return ExtensionManager(
+            config=config.extensions if hasattr(config, "extensions") else config
+        )
+    return None
+
+
+def create_metrics_logger(
+    config: Union[EnhancedTrainingConfig, Dict[str, Any]]
+) -> MetricsLogger:
+    """
+    Create a metrics logger based on configuration.
+    
+    Args:
+        config: Training configuration
+        
+    Returns:
+        Initialized metrics logger
+    """
+    # Get output directory
+    if isinstance(config, dict):
+        output_dir = config.get("output_dir", "runs/quantum_resonance")
+        logging_steps = config.get("logging_steps", 10)
+    elif isinstance(config, EnhancedTrainingConfig) or isinstance(config, TrainingConfig):
+        output_dir = config.output_dir
+        logging_steps = config.logging_steps
+    else:
+        output_dir = "runs/quantum_resonance"
+        logging_steps = 10
+    
+    # Create metrics logger
+    return MetricsLogger(
+        log_dir=output_dir,
+        logging_steps=logging_steps
+    )
+
+
+def create_checkpoint_manager(
+    config: Union[EnhancedTrainingConfig, Dict[str, Any]]
+) -> CheckpointManager:
+    """
+    Create a checkpoint manager based on configuration.
+    
+    Args:
+        config: Training configuration
+        
+    Returns:
+        Initialized checkpoint manager
+    """
+    # Get checkpoint directory
+    if isinstance(config, dict):
+        output_dir = config.get("output_dir", "runs/quantum_resonance")
+        save_total_limit = config.get("checkpointing", {}).get("save_total_limit", 3)
+    elif isinstance(config, EnhancedTrainingConfig):
+        output_dir = config.output_dir
+        save_total_limit = config.checkpointing.save_total_limit
+    else:  # Handle legacy TrainingConfig
+        output_dir = config.output_dir
+        save_total_limit = getattr(config, "save_total_limit", 3)
+    
+    # Use checkpoint_dir from config if available
+    if isinstance(config, EnhancedTrainingConfig):
+        checkpoint_dir = config.checkpointing.checkpoint_kwargs.get("checkpoint_dir", None)
+    elif isinstance(config, TrainingConfig):
+        checkpoint_dir = getattr(config, "checkpoint_dir", None)
+    else:
+        checkpoint_dir = config.get("checkpoint_dir", None)
+    
+    if checkpoint_dir is None:
+        checkpoint_dir = os.path.join(output_dir, "checkpoints")
+    
+    # Create checkpoint manager
+    return CheckpointManager(
+        config=config,
+        output_dir=checkpoint_dir,
+        save_total_limit=save_total_limit
+    )
+
+
+def create_trainer(
+    model: Optional[nn.Module] = None,
+    config: Optional[Union[EnhancedTrainingConfig, TrainingConfig, Dict[str, Any]]] = None,
+    model_config: Optional[ModelConfig] = None,
+    model_adapter: Optional[ModelAdapter] = None,
+    dataset_adapter: Optional[DatasetAdapter] = None,
+    strategy: Optional[TrainingStrategy] = None,
+    extension_manager: Optional[ExtensionManager] = None,
+    metrics_logger: Optional[MetricsLogger] = None,
+    checkpoint_manager: Optional[CheckpointManager] = None,
+    device: Optional[torch.device] = None,
+    enable_memory_optimizations: bool = True
+) -> TrainerCore:
+    """
+    Create a trainer instance with all components.
+    
+    Args:
+        model: Model to train (optional, will be created by model_adapter if not provided)
+        config: Training configuration
         model_config: Model configuration
-        training_config: Training configuration
-        data_config: Data configuration
-        output_dir: Directory for outputs
-        logger: Logger instance
-        trainer_type: Type of trainer to create (default: from training_config)
+        model_adapter: Model adapter (optional, will be created from config if not provided)
+        dataset_adapter: Dataset adapter (optional, will be created from config if not provided)
+        strategy: Training strategy (optional, will be created from config if not provided)
+        extension_manager: Extension manager (optional, will be created from config if not provided)
+        metrics_logger: Metrics logger (optional, will be created from config if not provided)
+        checkpoint_manager: Checkpoint manager (optional, will be created from config if not provided)
+        device: Device to use for training
+        enable_memory_optimizations: Whether to enable memory optimizations like gradient checkpointing
         
     Returns:
         Initialized trainer instance
-        
-    Raises:
-        ValueError: If trainer_type is not supported
     """
-    # Determine trainer type from config if not provided
-    if trainer_type is None:
-        trainer_type = getattr(training_config, "trainer_type", "unified")
+    # Default configuration if not provided
+    if config is None:
+        config = EnhancedTrainingConfig()
     
-    # Create logger if not provided
-    if logger is None:
-        logger = logging.getLogger("quantum_resonance")
+    # Convert legacy TrainingConfig to EnhancedTrainingConfig if needed
+    if isinstance(config, TrainingConfig) and not isinstance(config, EnhancedTrainingConfig):
+        enhanced_config = EnhancedTrainingConfig()
+        enhanced_config.update_from_base_config(config)
+        config = enhanced_config
     
-    # Create trainer based on type
-    trainer_type = trainer_type.lower()
+    # Get device
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    if trainer_type == "unified":
-        # Create unified trainer with appropriate components based on config
-        return create_unified_trainer(
-            model_config, training_config, data_config, output_dir, logger
+    # Create model adapter if not provided
+    if model_adapter is None:
+        model_adapter = create_model_adapter(config, model_config, device)
+    
+    # Set model if provided
+    if model is not None:
+        model_adapter.set_model(model)
+    
+    # Create dataset adapter if not provided
+    if dataset_adapter is None:
+        dataset_adapter = create_dataset_adapter(
+            config,
+            tokenizer=model_adapter.get_tokenizer()
         )
-    elif trainer_type == "enhanced":
-        warnings.warn(
-            "The 'enhanced' trainer type is deprecated and will be removed in a future version. "
-            "Use 'unified' trainer type instead.",
-            DeprecationWarning, stacklevel=2
-        )
-        return create_enhanced_trainer(
-            model_config, training_config, data_config, output_dir, logger
-        )
-    elif trainer_type == "standard":
-        warnings.warn(
-            "The 'standard' trainer type is deprecated and will be removed in a future version. "
-            "Use 'unified' trainer type instead.",
-            DeprecationWarning, stacklevel=2
-        )
-        # Forward to unified trainer with standard settings
-        training_config.model_type = "standard"
-        return create_unified_trainer(
-            model_config, training_config, data_config, output_dir, logger
-        )
-    elif trainer_type == "dialogue":
-        warnings.warn(
-            "The 'dialogue' trainer type is deprecated and will be removed in a future version. "
-            "Use 'unified' trainer type with model_type='dialogue' instead.",
-            DeprecationWarning, stacklevel=2
-        )
-        # Forward to unified trainer with dialogue settings
-        training_config.model_type = "dialogue"
-        return create_unified_trainer(
-            model_config, training_config, data_config, output_dir, logger
-        )
-    elif trainer_type == "base":
-        warnings.warn(
-            "The 'base' trainer type is deprecated and will be removed in a future version. "
-            "Use 'unified' trainer type instead.",
-            DeprecationWarning, stacklevel=2
-        )
-        # Direct instantiation for backward compatibility
-        return BaseTrainer(
-            model_config, training_config, data_config, output_dir, logger
-        )
+    
+    # Create training strategy if not provided
+    if strategy is None:
+        strategy = create_training_strategy(config)
+    
+    # Create extension manager if not provided
+    if extension_manager is None:
+        extension_manager = create_extension_manager(config)
+    
+    # Create metrics logger if not provided
+    if metrics_logger is None:
+        metrics_logger = create_metrics_logger(config)
+    
+    # Create checkpoint manager if not provided
+    if checkpoint_manager is None:
+        checkpoint_manager = create_checkpoint_manager(config)
+    
+    # Configure memory optimizations if enabled
+    if enable_memory_optimizations and torch.cuda.is_available():
+        # Enable if using EnhancedTrainingConfig
+        if isinstance(config, EnhancedTrainingConfig) and hasattr(config.optimization, "use_gradient_checkpointing"):
+            config.optimization.use_gradient_checkpointing = True
+            config.optimization.enable_memory_efficient_eval = True
+            config.optimization.auto_handle_oom = True
+            logger.info("Memory optimizations enabled in configuration")
+        
+        # For model adapter's model, apply gradient checkpointing directly if needed
+        if model_adapter and model_adapter.get_model():
+            from src.training.optimization.memory_utils import enable_gradient_checkpointing
+            enable_gradient_checkpointing(model_adapter.get_model())
+            logger.info("Applied gradient checkpointing to model directly")
+    
+    # Create and return the trainer
+    trainer = TrainerCore(
+        config=config,
+        model_adapter=model_adapter,
+        dataset_adapter=dataset_adapter,
+        strategy=strategy,
+        extension_manager=extension_manager,
+        metrics_logger=metrics_logger,
+        checkpoint_manager=checkpoint_manager,
+        device=device
+    )
+    
+    # Auto-resume from checkpoint if configured
+    if isinstance(config, EnhancedTrainingConfig):
+        auto_resume = config.checkpointing.auto_resume
     else:
-        raise ValueError(f"Unsupported trainer type: {trainer_type}")
+        auto_resume = getattr(config, "auto_resume", True)
+    
+    if auto_resume:
+        trainer.load_checkpoint()
+    
+    return trainer
 
 
-def create_unified_trainer(
-    model_config: ModelConfig,
-    training_config: TrainingConfig,
-    data_config: DataConfig,
-    output_dir: Optional[str] = None,
-    logger: Optional[logging.Logger] = None
-) -> UnifiedTrainer:
+def create_trainer_from_config(
+    config_path: str,
+    model: Optional[nn.Module] = None,
+    model_config: Optional[ModelConfig] = None
+) -> TrainerCore:
     """
-    Create a unified trainer with all components.
+    Create a trainer from a configuration file.
     
     Args:
-        model_config: Model configuration
-        training_config: Training configuration
-        data_config: Data configuration
-        output_dir: Directory for outputs
-        logger: Logger instance
+        config_path: Path to JSON or YAML configuration file
+        model: Model to train (optional)
+        model_config: Model configuration (optional)
         
     Returns:
-        Initialized unified trainer
+        Initialized trainer instance
     """
-    # Create logger if not provided
-    if logger is None:
-        logger = logging.getLogger("quantum_resonance")
+    import json
+    import os
     
-    # Determine device
-    device = _get_device(training_config)
+    # Check if file exists
+    if not os.path.exists(config_path):
+        raise ValueError(f"Configuration file not found: {config_path}")
     
-    # Create model adapter
-    model_type = getattr(training_config, "model_type", "standard")
-    model_adapter = get_model_adapter(
-        model_type,
-        model_config,
-        training_config,
-        device,
-        logger
-    )
+    # Load configuration
+    with open(config_path, "r") as f:
+        if config_path.endswith(".json"):
+            config_dict = json.load(f)
+        elif config_path.endswith((".yaml", ".yml")):
+            try:
+                import yaml
+                config_dict = yaml.safe_load(f)
+            except ImportError:
+                raise ImportError("PyYAML is required for loading YAML configurations. Install with 'pip install pyyaml'.")
+        else:
+            raise ValueError(f"Unsupported configuration format: {config_path}")
     
-    # Create training strategy
-    strategy_type = getattr(training_config, "training_strategy", "standard")
-    training_strategy = get_training_strategy(
-        strategy_type,
-        training_config,
-        logger
-    )
+    # Create config object
+    config = EnhancedTrainingConfig.from_dict(config_dict)
     
-    # Create extension manager
-    extension_manager = ExtensionManager(
-        training_config,
-        logger
-    )
-    
-    # Create checkpoint manager
-    checkpoint_manager = CheckpointManager(
-        training_config,
-        output_dir,
-        logger
-    )
-    
-    # Create metrics logger
-    metrics_logger = MetricsLogger(
-        output_dir or getattr(training_config, "output_dir", "runs/quantum_resonance"),
-        log_to_console=True,
-        log_to_tensorboard=getattr(training_config, "use_tensorboard", True),
-        log_to_file=True,
-        logger=logger
-    )
-    
-    # Create unified trainer
-    return UnifiedTrainer(
-        model_config=model_config,
-        training_config=training_config,
-        data_config=data_config,
-        output_dir=output_dir,
-        logger=logger,
-        model_adapter=model_adapter,
-        training_strategy=training_strategy,
-        extension_manager=extension_manager,
-        checkpoint_manager=checkpoint_manager,
-        metrics_logger=metrics_logger
+    # Create trainer
+    return create_trainer(
+        model=model,
+        config=config,
+        model_config=model_config
     )
 
-def create_enhanced_trainer(
-    model_config: ModelConfig,
-    training_config: TrainingConfig,
-    data_config: DataConfig,
-    output_dir: Optional[str] = None,
-    logger: Optional[logging.Logger] = None
-) -> EnhancedTrainer:
+
+def get_trainer_from_name(
+    trainer_name: str,
+    config: Union[EnhancedTrainingConfig, TrainingConfig],
+    model: Optional[nn.Module] = None,
+    model_config: Optional[ModelConfig] = None
+) -> TrainerCore:
     """
-    Create an enhanced trainer with all components.
+    Get a trainer instance by name.
     
     Args:
-        model_config: Model configuration
-        training_config: Training configuration
-        data_config: Data configuration
-        output_dir: Directory for outputs
-        logger: Logger instance
+        trainer_name: Name of the trainer type
+        config: Training configuration
+        model: Model to train (optional)
+        model_config: Model configuration (optional)
         
     Returns:
-        Initialized enhanced trainer
+        Initialized trainer instance
     """
-    # Create logger if not provided
-    if logger is None:
-        logger = logging.getLogger("quantum_resonance")
+    trainer_name = trainer_name.lower()
     
-    # Determine device
-    device = _get_device(training_config)
-    
-    # Create model adapter
-    model_type = getattr(training_config, "model_type", "standard")
-    model_adapter = get_model_adapter(
-        model_type,
-        model_config,
-        training_config,
-        device,
-        logger
+    # For now, all trainers use TrainerCore with different configurations
+    return create_trainer(
+        model=model,
+        config=config,
+        model_config=model_config
     )
-    
-    # Create training strategy
-    strategy_type = getattr(training_config, "training_strategy", "standard")
-    training_strategy = get_training_strategy(
-        strategy_type,
-        training_config,
-        logger
-    )
-    
-    # Create extension manager
-    extension_manager = ExtensionManager(
-        training_config,
-        logger
-    )
-    
-    # Create checkpoint manager
-    checkpoint_manager = CheckpointManager(
-        training_config,
-        output_dir,
-        logger
-    )
-    
-    # Create metrics logger
-    metrics_logger = MetricsLogger(
-        output_dir or getattr(training_config, "output_dir", "runs/quantum_resonance"),
-        log_to_console=True,
-        log_to_tensorboard=getattr(training_config, "use_tensorboard", True),
-        log_to_file=True,
-        logger=logger
-    )
-    
-    # Create enhanced trainer
-    return EnhancedTrainer(
-        model_config=model_config,
-        training_config=training_config,
-        data_config=data_config,
-        output_dir=output_dir,
-        logger=logger,
-        model_adapter=model_adapter,
-        training_strategy=training_strategy,
-        extension_manager=extension_manager,
-        checkpoint_manager=checkpoint_manager,
-        metrics_logger=metrics_logger
-    )
-
-
-def create_trainer_for_model_type(
-    model_type: str,
-    model_config: ModelConfig,
-    training_config: TrainingConfig,
-    data_config: DataConfig,
-    output_dir: Optional[str] = None,
-    logger: Optional[logging.Logger] = None
-) -> EnhancedTrainer:
-    """
-    Create a trainer optimized for a specific model type.
-    
-    Args:
-        model_type: Type of model ('standard', 'dialogue', 'multimodal')
-        model_config: Model configuration
-        training_config: Training configuration
-        data_config: Data configuration
-        output_dir: Directory for outputs
-        logger: Logger instance
-        
-    Returns:
-        Initialized trainer for the specific model type
-    """
-    # Set model type in training config
-    setattr(training_config, "model_type", model_type)
-    
-    # Choose appropriate strategy based on model type
-    strategy_map = {
-        "standard": "standard",
-        "dialogue": "standard",
-        "multimodal": "standard",
-        "finetune": "finetune"
-    }
-    
-    # Set strategy type in training config
-    strategy_type = getattr(training_config, "training_strategy", None)
-    if strategy_type is None:
-        strategy_type = strategy_map.get(model_type, "standard")
-        setattr(training_config, "training_strategy", strategy_type)
-    
-    # Create enhanced trainer
-    return create_enhanced_trainer(
-        model_config, training_config, data_config, output_dir, logger
-    )
-
-
-def _get_device(training_config: TrainingConfig) -> torch.device:
-    """
-    Get device from training configuration.
-    
-    Args:
-        training_config: Training configuration
-        
-    Returns:
-        Device to use
-    """
-    from src.utils.device import get_device
-    return get_device(getattr(training_config, "device", None))
