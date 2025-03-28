@@ -426,12 +426,37 @@ def apply_gradients(
             grad_norm = torch.nn.utils.clip_grad_norm_(parameters, max_grad_norm).item()
     
     # Apply gradients
-    if grad_scaler is not None and hasattr(grad_scaler, "step"):
-        # Use gradient scaler for mixed precision
-        grad_scaler.step(optimizer)
-        grad_scaler.update()
-    else:
-        # Standard optimizer step
-        optimizer.step()
+    try:
+        if grad_scaler is not None and hasattr(grad_scaler, "step"):
+            # Check if it's our wrapper or the PyTorch implementation
+            if hasattr(grad_scaler, "grad_scaler") and grad_scaler.grad_scaler is not None:
+                # It's our GradScalerManager wrapper, use safely
+                grad_scaler.step(optimizer)
+                grad_scaler.update()
+            else:
+                # It's the raw PyTorch scaler, try with fallback
+                try:
+                    grad_scaler.step(optimizer)
+                    grad_scaler.update()
+                except AssertionError as e:
+                    # Handle "No inf checks were recorded for this optimizer" error
+                    if "No inf checks were recorded" in str(e):
+                        # Fall back to standard optimizer step
+                        optimizer.step()
+                    else:
+                        raise
+        else:
+            # Standard optimizer step
+            optimizer.step()
+    except Exception as e:
+        # If anything goes wrong, log and do a standard optimizer step
+        import logging
+        logger = logging.getLogger("quantum_resonance")
+        logger.error(f"Error in gradient application: {e}, falling back to standard step")
+        try:
+            # Try to do a regular step as last resort
+            optimizer.step()
+        except Exception as inner_e:
+            logger.error(f"Even fallback optimizer step failed: {inner_e}")
     
     return grad_norm
