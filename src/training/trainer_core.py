@@ -968,6 +968,32 @@ class TrainerCore:
         """
         return self.scheduler.get_last_lr()[0]
     
+    def evaluate(self, dataloader: Optional[DataLoader] = None, split: str = "val") -> Dict[str, float]:
+        """
+        Evaluate the model on a dataset.
+        
+        Args:
+            dataloader: Dataloader to evaluate on (defaults to val_dataloader)
+            split: Name of the split for reporting metrics
+            
+        Returns:
+            Dictionary of evaluation metrics
+        """
+        # Use provided dataloader or fall back to val_dataloader
+        if dataloader is None:
+            if self.val_dataloader is None:
+                logger.error("No validation dataloader available")
+                return {"loss": float('inf'), "error": 1.0}
+            dataloader = self.val_dataloader
+        
+        # Run evaluation
+        try:
+            return self._validate(dataloader, split)
+        except Exception as e:
+            logger.error(f"Error during evaluation: {e}")
+            # Return default metrics on error
+            return {"loss": float('inf'), "error": 1.0}
+    
     def get_model(self) -> nn.Module:
         """
         Get the current model.
