@@ -88,10 +88,29 @@ class DialogueModelAdapter(ModelAdapter):
         Returns:
             Initialized tokenizer with dialogue tokens
         """
-        self.logger.info(f"Loading tokenizer for dialogue: {self.model_config.tokenizer_name}")
+        # Find tokenizer name from config
+        tokenizer_name = None
+        
+        # Try to get from model_config
+        if self.model_config and hasattr(self.model_config, "tokenizer_name"):
+            tokenizer_name = self.model_config.tokenizer_name
+        
+        # Try to get from training_config
+        if tokenizer_name is None and self.training_config:
+            if hasattr(self.training_config, "model_adapter") and hasattr(self.training_config.model_adapter, "tokenizer_name"):
+                tokenizer_name = self.training_config.model_adapter.tokenizer_name
+            elif hasattr(self.training_config, "tokenizer_name"):
+                tokenizer_name = self.training_config.tokenizer_name
+        
+        # Default tokenizer if none specified
+        if tokenizer_name is None:
+            tokenizer_name = "gpt2"
+            self.logger.warning(f"No tokenizer name found in config, using default: {tokenizer_name}")
+        
+        self.logger.info(f"Loading tokenizer for dialogue: {tokenizer_name}")
         
         # Load tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(self.model_config.tokenizer_name)
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         
         # Set default pad token if not set
         if not tokenizer.pad_token:
