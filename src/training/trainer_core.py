@@ -260,7 +260,8 @@ class TrainerCore:
         
         # Log extension information
         if self.extension_manager is not None:
-            extensions = self.extension_manager.get_active_extensions()
+            # Use get_extension_names() instead of get_active_extensions()
+            extensions = self.extension_manager.get_extension_names()
             if extensions:
                 logger.info(f"  Active extensions: {', '.join(extensions)}")
     
