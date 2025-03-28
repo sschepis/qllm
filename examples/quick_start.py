@@ -156,7 +156,7 @@ def quick_start_demo(resume_checkpoint=None):
         batch_size=8,      # Small batch size
         learning_rate=5e-4,  # Slightly higher for quick convergence
         weight_decay=0.01,
-        max_epochs=1,      # Multiple epochs for better training
+        max_epochs=3,      # Multiple epochs for better training
         warmup_steps=10,
         accumulation_steps=1,
         save_steps=50,      # Save every 50 steps
@@ -178,7 +178,7 @@ def quick_start_demo(resume_checkpoint=None):
     
     # Load a small subset of WikiText
     print("Loading data...")
-    dataset = load_dataset("wikitext", "wikitext-103-raw-v1", split="train[:10000]")
+    dataset = load_dataset("wikitext", "wikitext-103-raw-v1", split="train[:100000]")
     
     # Prepare dataset
     def tokenize_function(examples):
