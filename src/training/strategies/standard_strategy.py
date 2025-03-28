@@ -316,42 +316,37 @@ class StandardTrainingStrategy(TrainingStrategy):
                 # Create a dummy loss as fallback
                 loss = torch.tensor(0.0, device=next(model.parameters()).device, requires_grad=True)
         
-        # Call the underlying train_step function with update_gradients=False first
-        # so we can capture the metrics without changing the model
-        with torch.no_grad():
-            try:
-                metrics = self.train_step(
-                    model=model,
-                    batch=prepared_batch,
-                    optimizer=optimizer,
-                    scaler=scaler,
-                    scheduler=scheduler,
-                    update_gradients=False  # Don't update weights, just compute metrics
-                )
-            except Exception as e:
-                self.logger.error(f"Error computing metrics: {e}")
-                # Handle any type of loss variable, including strings from error messages
-                if isinstance(loss, torch.Tensor) and hasattr(loss, 'item'):
-                    metrics = {"loss": loss.item()}
-                elif isinstance(loss, (int, float)):
-                    metrics = {"loss": float(loss)}
-                else:
-                    # Convert anything else to string and use a default value
-                    self.logger.error(f"Unexpected loss type: {type(loss)}, value: {str(loss)}")
-                    metrics = {"loss": 0.0}
-        
-        # Now do the actual gradient step with update_gradients=True
+        # We can't call train_step twice on the same model/batch due to in-place operations
+        # and autograd issues. Instead, we'll just do the real forward pass once and use that.
         try:
-            self.train_step(
+            # Create a clean copy of the batch to avoid reference issues
+            clean_batch = {}
+            for k, v in prepared_batch.items():
+                if isinstance(v, torch.Tensor):
+                    clean_batch[k] = v.detach().clone()
+                else:
+                    clean_batch[k] = v
+            
+            # Get model gradients and compute metrics in a single pass
+            metrics = self.train_step(
                 model=model,
-                batch=prepared_batch,
+                batch=clean_batch,
                 optimizer=optimizer,
                 scaler=scaler,
                 scheduler=scheduler,
-                update_gradients=True  # Actually update the weights
+                update_gradients=True  # Do the real update
             )
         except Exception as e:
-            self.logger.error(f"Error updating model weights: {e}")
+            self.logger.error(f"Error in training step: {e}")
+            # Handle any type of loss variable, including strings from error messages
+            if isinstance(loss, torch.Tensor) and hasattr(loss, 'item'):
+                metrics = {"loss": loss.item()}
+            elif isinstance(loss, (int, float)):
+                metrics = {"loss": float(loss)}
+            else:
+                # Convert anything else to string and use a default value
+                self.logger.error(f"Unexpected loss type: {type(loss)}, value: {str(loss)}")
+                metrics = {"loss": 0.0}
         
         return loss, metrics
     
