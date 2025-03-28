@@ -452,6 +452,7 @@ class TrainerFactory:
         model: Optional[nn.Module] = None,
         config: Optional[Union[EnhancedTrainingConfig, TrainingConfig, Dict[str, Any]]] = None,
         model_config: Optional[ModelConfig] = None,
+        training_config: Optional[Union[EnhancedTrainingConfig, TrainingConfig]] = None,
         **kwargs
     ) -> TrainerCore:
         """
@@ -461,14 +462,22 @@ class TrainerFactory:
             model: Model to train
             config: Training configuration
             model_config: Model configuration
+            training_config: Alternative name for training configuration (for compatibility)
             **kwargs: Additional arguments
             
         Returns:
             Configured trainer instance
         """
+        # Use config if provided, otherwise use training_config
+        effective_config = config if config is not None else training_config
+        
+        # Remove training_config from kwargs to avoid passing it to create_trainer
+        if 'training_config' in kwargs:
+            del kwargs['training_config']
+            
         return create_trainer(
             model=model,
-            config=config,
+            config=effective_config,
             model_config=model_config,
             **kwargs
         )
