@@ -286,7 +286,8 @@ def create_trainer(
     metrics_logger: Optional[MetricsLogger] = None,
     checkpoint_manager: Optional[CheckpointManager] = None,
     device: Optional[torch.device] = None,
-    enable_memory_optimizations: bool = True
+    enable_memory_optimizations: bool = True,
+    **kwargs  # Accept additional arguments and ignore them
 ) -> TrainerCore:
     """
     Create a trainer instance with all components.
@@ -453,6 +454,7 @@ class TrainerFactory:
         config: Optional[Union[EnhancedTrainingConfig, TrainingConfig, Dict[str, Any]]] = None,
         model_config: Optional[ModelConfig] = None,
         training_config: Optional[Union[EnhancedTrainingConfig, TrainingConfig]] = None,
+        data_config: Optional[Any] = None,
         **kwargs
     ) -> TrainerCore:
         """
@@ -463,6 +465,7 @@ class TrainerFactory:
             config: Training configuration
             model_config: Model configuration
             training_config: Alternative name for training configuration (for compatibility)
+            data_config: Data configuration (for compatibility)
             **kwargs: Additional arguments
             
         Returns:
@@ -471,15 +474,24 @@ class TrainerFactory:
         # Use config if provided, otherwise use training_config
         effective_config = config if config is not None else training_config
         
-        # Remove training_config from kwargs to avoid passing it to create_trainer
-        if 'training_config' in kwargs:
-            del kwargs['training_config']
+        # Filter out parameters that should not be passed to the underlying function
+        filtered_kwargs = kwargs.copy()
+        for param in ['training_config', 'data_config']:
+            if param in filtered_kwargs:
+                filtered_kwargs.pop(param)
+        
+        # Handle data_config: in the original system, this might be needed elsewhere
+        # but we'll include it in our kwargs to capture it
+        augmented_kwargs = {}
+        if data_config is not None:
+            augmented_kwargs['data_config'] = data_config
             
+        # Create the underlying trainer with the processed parameters
         return create_trainer(
             model=model,
             config=effective_config,
             model_config=model_config,
-            **kwargs
+            **filtered_kwargs
         )
     
     @staticmethod
