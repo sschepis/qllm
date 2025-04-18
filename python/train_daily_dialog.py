@@ -10,6 +10,7 @@ from tokenizers import Tokenizer
 # from tensorflow.keras.callbacks import TensorBoard, Callback
 import tensorflow as tf # Ensure tf is available for summary writing
 from tqdm import tqdm # For progress bars
+import argparse # Add argparse for command-line arguments
 
 # --- Add project root to sys.path ---
 # Get the directory of the current script
@@ -37,9 +38,9 @@ MODEL_CONFIG = {
     # vocab_size will be determined by the tokenizer
     'sequence_length': 128, # Max sequence length for padding/truncation
     'embedding_dim': 256,
-    'num_layers': 4,
+    'num_layers': 8,
     'num_heads': 8,
-    'primes': [3, 5, 7, 11, 13], # Example primes
+    'primes': [3, 5, 7, 11, 13, 17, 19, 23], # Example primes
     'beta': 1.0,
     'memory_size': 64,
     'ffn_dim_multiplier': 4,
@@ -54,7 +55,7 @@ TRAINING_CONFIG = {
     'dataset_name': 'daily_dialog',
     'text_column': 'dialog', # Column containing the dialogue list
     'batch_size': 8,        # Adjust based on GPU memory
-    'epochs': 2,             # Number of training epochs
+    'epochs': 10,             # Number of training epochs
     'learning_rate': 5e-5,
     'buffer_size': 10000,    # Shuffle buffer size
     'validation_split': 0.1 # Use 10% of training data for validation if no val split exists
@@ -197,6 +198,17 @@ def calculate_metrics(y_true, y_pred_dict, model_config):
 
 
 def main():
+    # --- Argument Parser ---
+    parser = argparse.ArgumentParser(description='Train Resonant Knowledge Model on Daily Dialog dataset.')
+    parser.add_argument(
+        '--num_records',
+        type=int,
+        default=0,
+        help='Number of training records to use (0 for all). Default: 0'
+    )
+    args = parser.parse_args()
+    logger.info(f"Parsed arguments: {args}")
+
     # --- Load Tokenizer ---
     # Tokenizer path is now relative to project root
     tokenizer_path = os.path.join(project_root, TRAINING_CONFIG['tokenizer_path'])
@@ -225,6 +237,18 @@ def main():
     else:
         train_dataset_hf = dataset['train']
         val_dataset_hf = dataset['validation']
+
+    # --- Select subset of training data if specified ---
+    if args.num_records > 0:
+        logger.info(f"Using the first {args.num_records} records for training.")
+        if args.num_records < len(train_dataset_hf):
+             train_dataset_hf = train_dataset_hf.select(range(args.num_records))
+             logger.info(f"Training dataset size after selection: {len(train_dataset_hf)}")
+        else:
+             logger.warning(f"Requested {args.num_records} records, but dataset only has {len(train_dataset_hf)}. Using all available training records.")
+    else:
+        logger.info("Using all available training records.")
+
 
     logger.info("Preprocessing training data...")
     train_inputs, train_targets = preprocess_dataset(

@@ -3,9 +3,11 @@ import numpy as np
 import os
 from tokenizers import Tokenizer
 import logging
+import sys # Import sys for path manipulation
+import argparse # Import argparse
 
 # Import the model definition (adjust path if necessary)
-from .model.resonant_knowledge_model import ResonantKnowledgeModel
+from python.model.resonant_knowledge_model import ResonantKnowledgeModel # Use absolute import
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -19,7 +21,7 @@ MODEL_CONFIG = {
     'embedding_dim': 256,
     'num_layers': 4,
     'num_heads': 8,
-    'primes': [3, 5, 7, 11, 13],
+    'primes': [3, 5, 7, 11, 13, 17, 19, 23], # Ensure this matches training config
     'beta': 1.0,
     'memory_size': 64,
     'ffn_dim_multiplier': 4,
@@ -27,23 +29,17 @@ MODEL_CONFIG = {
     # Loss hyperparameters are not needed for inference
 }
 
-CHAT_CONFIG = {
-    'tokenizer_path': '../daily_dialog_tokenizer.json', # Relative path from chat.py
-    'weights_path': '../rkm_daily_dialog_final.weights.h5', # Relative path from chat.py
-    'max_generate_length': 50, # Max number of tokens to generate per turn
-    'temperature': 0.7, # Sampling temperature (higher = more random)
-    'top_k': 40, # Consider only top_k logits for sampling
-}
 
-def load_model_and_tokenizer():
-    """Loads the tokenizer and the trained model."""
+def load_model_and_tokenizer(args):
+    """Loads the tokenizer and the trained model using paths from args."""
     # --- Load Tokenizer ---
-    tokenizer_path_abs = os.path.join(os.path.dirname(__file__), CHAT_CONFIG['tokenizer_path'])
-    if not os.path.exists(tokenizer_path_abs):
-        logger.error(f"Tokenizer file not found at: {tokenizer_path_abs}")
+    # Paths are now relative to the current working directory (project root)
+    tokenizer_path = args.tokenizer_path
+    if not os.path.exists(tokenizer_path):
+        logger.error(f"Tokenizer file not found at: {tokenizer_path}")
         return None, None
-    logger.info(f"Loading tokenizer from: {tokenizer_path_abs}")
-    tokenizer = Tokenizer.from_file(tokenizer_path_abs)
+    logger.info(f"Loading tokenizer from: {tokenizer_path}")
+    tokenizer = Tokenizer.from_file(tokenizer_path)
     vocab_size = tokenizer.get_vocab_size()
     MODEL_CONFIG['vocab_size'] = vocab_size
     logger.info(f"Tokenizer loaded. Vocab size: {vocab_size}")
@@ -63,13 +59,13 @@ def load_model_and_tokenizer():
     model.summary() # Print model summary
 
     # --- Load Weights ---
-    weights_path_abs = os.path.join(os.path.dirname(__file__), CHAT_CONFIG['weights_path'])
-    if not os.path.exists(weights_path_abs):
-        logger.error(f"Weights file not found at: {weights_path_abs}")
-        logger.error("Please ensure the model has been trained and weights are saved.")
-        return None, None
-    logger.info(f"Loading weights from: {weights_path_abs}")
-    model.load_weights(weights_path_abs)
+    weights_path = args.weights_path
+    if not os.path.exists(weights_path):
+         logger.error(f"Weights file not found at: {weights_path}")
+         logger.error("Please ensure the model has been trained and weights are saved.")
+         return None, None
+    logger.info(f"Loading weights from: {weights_path}")
+    model.load_weights(weights_path)
     logger.info("Model weights loaded successfully.")
 
     return model, tokenizer
@@ -82,7 +78,7 @@ def generate_response(model, tokenizer, input_text, max_length, temperature, top
     # Encode the input text
     input_encoding = tokenizer.encode(input_text)
     input_ids = input_encoding.ids
-    
+
     # Truncate if necessary to fit within sequence length minus 1 (for next token)
     if len(input_ids) >= sequence_length:
         input_ids = input_ids[-(sequence_length - 1):]
@@ -95,17 +91,18 @@ def generate_response(model, tokenizer, input_text, max_length, temperature, top
         # Prepare model input
         current_sequence = generated_ids[-(sequence_length):] # Get the last part of the sequence
         padded_sequence = np.pad(current_sequence, (sequence_length - len(current_sequence), 0), 'constant')
-        
+
         input_tokens = np.array([padded_sequence], dtype=np.int32)
         positions = np.arange(sequence_length, dtype=np.int32).reshape(1, -1)
-        
+
         input_dict = {'input_tokens': input_tokens, 'positions_input': positions}
 
-        # Get logits from the model
-        logits = model(input_dict, training=False) # Shape: (1, seq_len, vocab_size)
+        # Get the output dictionary from the model
+        model_output_dict = model(input_dict, training=False)
+        logits_tensor = model_output_dict['logits'] # Extract the logits tensor
 
         # Get logits for the *next* token prediction (at the end of the current sequence)
-        next_token_logits = logits[0, len(current_sequence) - 1, :] # Logits for the position after the last input token
+        next_token_logits = logits_tensor[0, len(current_sequence) - 1, :] # Logits for the position after the last input token
 
         # Apply temperature scaling
         scaled_logits = next_token_logits / temperature
@@ -134,11 +131,40 @@ def generate_response(model, tokenizer, input_text, max_length, temperature, top
     # Decode the generated sequence (excluding the initial input)
     response_ids = generated_ids[len(input_ids):]
     response_text = tokenizer.decode(response_ids)
-    
+
     return response_text
 
 def main():
-    model, tokenizer = load_model_and_tokenizer()
+    # --- Argument Parser ---
+    parser = argparse.ArgumentParser(description='Chat with a Resonant Knowledge Model.')
+    parser.add_argument(
+        '--tokenizer-path',
+        type=str,
+        default='daily_dialog_tokenizer.json', # Default relative to project root
+        help='Path to the tokenizer file.'
+    )
+    parser.add_argument(
+        '--weights-path',
+        type=str,
+        default='rkm_daily_dialog_final.weights.h5', # Default relative to project root
+        help='Path to the model weights file (.h5 format).'
+    )
+    parser.add_argument(
+        '--max-generate-length', type=int, default=50,
+        help='Maximum number of tokens to generate per turn.'
+    )
+    parser.add_argument(
+        '--temperature', type=float, default=0.7,
+        help='Sampling temperature (higher = more random).'
+    )
+    parser.add_argument(
+        '--top-k', type=int, default=40,
+        help='Consider only top_k logits for sampling (0 to disable).'
+    )
+    args = parser.parse_args()
+    logger.info(f"Parsed arguments: {args}")
+
+    model, tokenizer = load_model_and_tokenizer(args)
     if model is None or tokenizer is None:
         return
 
@@ -158,9 +184,9 @@ def main():
                 model,
                 tokenizer,
                 user_input,
-                max_length=CHAT_CONFIG['max_generate_length'],
-                temperature=CHAT_CONFIG['temperature'],
-                top_k=CHAT_CONFIG['top_k']
+                max_length=args.max_generate_length,
+                temperature=args.temperature,
+                top_k=args.top_k
             )
             print(f"Bot: {response}")
 
